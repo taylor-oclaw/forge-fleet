@@ -261,8 +261,9 @@ class MCPServer:
             start_tier = args.get("start_tier", 1)
             max_tier = args.get("max_tier", 4)
             
-            # Refresh router with latest discovery
-            self.router = FleetRouter()
+            # Use cached router if available, refresh discovery only if empty
+            if not self.router.endpoints:
+                self.router = FleetRouter()
             result = self.router.tiered_execute(prompt, start_tier, max_tier)
             
             return (
@@ -414,8 +415,9 @@ class MCPServer:
                      func=run_command),
             ]
             
-            # Get fleet-aware LLMs
-            self.router = FleetRouter()
+            # Get fleet-aware LLMs (use cached router)
+            if not self.router.endpoints:
+                self.router = FleetRouter()
             llm_fast = self.router.get_llm(1) or LLM(base_url="http://192.168.5.100:51803/v1")
             llm_code = self.router.get_llm(2) or llm_fast
             llm_review = self.router.get_llm(3) or llm_code
