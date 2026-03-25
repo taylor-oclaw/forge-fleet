@@ -2,7 +2,7 @@
 
 **Distributed AI Coding Agent Orchestration System**
 
-ForgeFleet turns a fleet of commodity machines with local LLMs into a production-grade software engineering team. Each agent can read files, write code, run tests, and iterate — using the best tool for each job.
+ForgeFleet turns any number of machines with local LLMs into a production-grade software engineering team. Each agent can read files, write code, run tests, and iterate — using the best tool for each job.
 
 ## Architecture
 
@@ -20,8 +20,8 @@ ForgeFleet turns a fleet of commodity machines with local LLMs into a production
 │            Local LLMs (llama.cpp)                     │
 │  Qwen3.5-9B │ Qwen2.5-Coder-32B │ Qwen2.5-72B │ 235B │
 ├──────────────┴───────────────────┴─────────────┴──────┤
-│              6 Physical Machines                       │
-│  Taylor(96GB) James(64GB) Marcus Sophie Priya Ace     │
+│              N Physical Machines (auto-discovered from fleet.json)                       │
+│  Auto-discovered from fleet.json — add/remove nodes anytime     │
 └───────────────────────────────────────────────────────┘
 ```
 
