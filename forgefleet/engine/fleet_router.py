@@ -63,6 +63,10 @@ class FleetRouter:
                     self.fleet_path = path
                     break
         self._load_fleet()
+        
+        # If no models found from fleet.json (v2 simplified), use discovery
+        if not self.endpoints:
+            self._discover_models()
     
     def _load_fleet(self):
         """Load fleet.json and build endpoint registry.
@@ -132,6 +136,26 @@ class FleetRouter:
                 self.tiers.setdefault(ep.tier, []).append(ep)
         
         self._loaded = True
+    
+    def _discover_models(self):
+        """Fall back to network discovery when fleet.json has no model listings."""
+        from .discovery import NetworkDiscovery
+        disc = NetworkDiscovery()
+        discovered = disc.scan_known_hosts()
+        
+        for ep in discovered:
+            model_ep = ModelEndpoint(
+                name=ep.model_name,
+                node=ep.hostname or ep.ip,
+                ip=ep.ip,
+                port=ep.port,
+                tier=ep.tier,
+            )
+            self.endpoints.append(model_ep)
+            self.tiers.setdefault(model_ep.tier, []).append(model_ep)
+        
+        if discovered:
+            self._loaded = True
     
     def check_health(self, ep: ModelEndpoint) -> bool:
         """Check if endpoint is reachable."""
