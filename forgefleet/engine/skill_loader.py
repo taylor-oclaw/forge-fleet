@@ -119,7 +119,7 @@ class SkillLoader:
             if score > 0:
                 scored.append((score, skill))
         
-        scored.sort(reverse=True)
+        scored.sort(key=lambda x: x[0], reverse=True)
         return [s[1] for s in scored[:max_skills]]
     
     def inject_into_prompt(self, task_description: str, max_chars: int = 4000) -> str:
