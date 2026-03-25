@@ -174,12 +174,12 @@ class SeniorityPipeline:
         config = SENIORITY_CONFIG[level]
         preferred_tier = config["tier"]
         
-        # Try preferred tier first, then fall back
+        # Try preferred tier first, then any available (all levels access all models)
         llm = self.router.get_llm(preferred_tier)
         if not llm:
-            # Try one tier up (e.g., use 72B for Junior work if 32B busy)
-            for fallback_tier in [preferred_tier + 1, preferred_tier - 1, preferred_tier + 2]:
-                if 1 <= fallback_tier <= 4:
+            # Try ALL tiers — any model is better than no model
+            for fallback_tier in sorted(range(1, 5), key=lambda t: abs(t - preferred_tier)):
+                if fallback_tier != preferred_tier:
                     llm = self.router.get_llm(fallback_tier)
                     if llm:
                         print(f"  ℹ️ {config['title']}: using tier {fallback_tier} (preferred {preferred_tier} busy)", flush=True)
