@@ -4,3 +4,4 @@ from .task import Task
 from .crew import Crew
 from .llm import LLM
 from .tool import Tool
+from .fleet_router import FleetRouter
