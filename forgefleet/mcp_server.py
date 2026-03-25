@@ -153,6 +153,33 @@ class MCPServer:
                     "required": ["node", "model_url", "model_path"],
                 },
             },
+            "fleet_wait": {
+                "description": "Wait until a fleet condition is met (e.g., model finishes loading, node comes online). Polls every 10 seconds up to the timeout. Returns immediately if condition already met.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "condition": {
+                            "type": "string",
+                            "enum": ["all_healthy", "tier_available", "model_loaded"],
+                            "description": "What to wait for: all_healthy=all known endpoints up, tier_available=specific tier has an available model, model_loaded=specific IP:port is healthy",
+                        },
+                        "tier": {
+                            "type": "integer",
+                            "description": "For tier_available: which tier to wait for (1-4)",
+                        },
+                        "endpoint": {
+                            "type": "string",
+                            "description": "For model_loaded: IP:port to wait for (e.g., 192.168.5.100:8080)",
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Max seconds to wait (default 300 = 5 min)",
+                            "default": 300,
+                        },
+                    },
+                    "required": ["condition"],
+                },
+            },
             "fleet_crew": {
                 "description": "Run a multi-agent coding crew on a task. Three agents work sequentially: Context Engineer (9B) researches the codebase, Code Writer (32B) implements, Code Reviewer (72B) verifies.",
                 "inputSchema": {
@@ -264,6 +291,52 @@ class MCPServer:
                 return f"Command timed out after {timeout}s"
             except Exception as e:
                 return f"SSH error: {e}"
+        
+        elif name == "fleet_wait":
+            condition = args["condition"]
+            timeout = args.get("timeout", 300)
+            start_time = time.time()
+            poll_interval = 10
+            
+            while time.time() - start_time < timeout:
+                if condition == "all_healthy":
+                    endpoints = self.discovery.scan_known_hosts()
+                    all_ok = all(
+                        ep.model_name != "loading..." and ep.healthy
+                        for ep in endpoints if ep.tier > 0
+                    )
+                    if all_ok and endpoints:
+                        return f"✅ All {len(endpoints)} endpoints are healthy"
+                
+                elif condition == "tier_available":
+                    tier = args.get("tier", 4)
+                    self.router = FleetRouter()
+                    available = self.router.get_available(tier)
+                    if available:
+                        ep = available[0]
+                        return f"✅ Tier {tier} available: {ep.name} @ http://{ep.ip}:{ep.port}"
+                
+                elif condition == "model_loaded":
+                    endpoint_str = args.get("endpoint", "192.168.5.100:8080")
+                    ip, port = endpoint_str.split(":")
+                    try:
+                        import urllib.request as ur
+                        req = ur.Request(f"http://{ip}:{port}/health")
+                        with ur.urlopen(req, timeout=5) as resp:
+                            data = json.loads(resp.read())
+                            if data.get("status") == "ok":
+                                return f"✅ Model at {endpoint_str} is loaded and healthy"
+                    except Exception:
+                        pass
+                
+                elapsed = int(time.time() - start_time)
+                remaining = timeout - elapsed
+                if remaining <= 0:
+                    break
+                time.sleep(min(poll_interval, remaining))
+            
+            elapsed = int(time.time() - start_time)
+            return f"⏰ Timeout after {elapsed}s waiting for {condition}"
         
         elif name == "fleet_install_model":
             ip = self._resolve_node(args["node"])
