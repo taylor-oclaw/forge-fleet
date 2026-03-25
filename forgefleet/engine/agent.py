@@ -230,4 +230,7 @@ class Agent:
         if self.backstory:
             parts.append(f"\nBackground: {self.backstory}")
         parts.append("\nProvide thorough, detailed responses. Never use placeholder code or TODOs.")
+        if self.tools:
+            parts.append("\nTo call a tool, use EXACTLY: <tools>{\"name\": \"tool_name\", \"arguments\": {\"key\": \"value\"}}</tools>")
+            parts.append("You MUST use tools to do your work. DO NOT describe changes — CALL the tool.")
         return "\n".join(parts)
