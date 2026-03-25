@@ -228,6 +228,7 @@ class NetworkDiscovery:
         """Quick scan of known hosts only (faster than full subnet scan).
         
         If no hosts provided, reads from fleet.json or uses defaults.
+        Deduplicates endpoints from alternate IPs (WiFi, Thunderbolt, etc.).
         """
         if hosts is None:
             hosts = self._get_known_ips()
@@ -237,7 +238,7 @@ class NetworkDiscovery:
             for port in self.known_ports:
                 targets.append((ip, port))
         
-        self.discovered = []
+        raw_discovered = []
         
         with ThreadPoolExecutor(max_workers=20) as executor:
             futures = {
@@ -248,9 +249,75 @@ class NetworkDiscovery:
             for future in as_completed(futures):
                 result = future.result()
                 if result:
-                    self.discovered.append(result)
+                    raw_discovered.append(result)
         
+        # Deduplicate: same model on same machine via different IPs
+        self.discovered = self._deduplicate(raw_discovered)
         return self.discovered
+    
+    def _deduplicate(self, endpoints: list[DiscoveredEndpoint]) -> list[DiscoveredEndpoint]:
+        """Remove duplicate endpoints from alternate network interfaces.
+        
+        Two endpoints are duplicates if they serve the same model
+        on the same port but different IPs. We keep the primary IP
+        (from fleet.json) and discard alternates.
+        
+        Also handles: Ace (.104 + .105), Priya (.106 + .55 + .54 + .252 + .96 + .99 + .51)
+        """
+        # Build a map of known alt IPs → primary IP from fleet.json
+        alt_ip_map = self._get_alt_ip_map()
+        
+        # Group by (canonical_ip, port)
+        seen = {}
+        for ep in endpoints:
+            # Resolve to primary IP
+            canonical_ip = alt_ip_map.get(ep.ip, ep.ip)
+            key = f"{canonical_ip}:{ep.port}"
+            
+            if key not in seen:
+                # Use the endpoint but with canonical IP
+                if canonical_ip != ep.ip:
+                    ep.ip = canonical_ip
+                    ep.url = f"http://{canonical_ip}:{ep.port}"
+                seen[key] = ep
+            # else: duplicate — skip
+        
+        return list(seen.values())
+    
+    def _get_alt_ip_map(self) -> dict:
+        """Build a map of alternate IPs → primary IP from fleet.json.
+        
+        Returns dict like: {"192.168.5.105": "192.168.5.104", ...}
+        """
+        alt_map = {}
+        
+        for path in [
+            os.path.expanduser("~/fleet.json"),
+            os.path.expanduser("~/.openclaw/workspace/fleet.json"),
+        ]:
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        fleet = json.load(f)
+                    
+                    for node_name, node in fleet.get("nodes", {}).items():
+                        primary_ip = node.get("ip", "")
+                        
+                        # Map alt_ip to primary
+                        alt_ip = node.get("alt_ip", "")
+                        if alt_ip:
+                            alt_map[alt_ip] = primary_ip
+                        
+                        # Map any additional alt_ips list
+                        for alt in node.get("alt_ips", []):
+                            if alt:
+                                alt_map[alt] = primary_ip
+                    
+                    break
+                except Exception:
+                    pass
+        
+        return alt_map
     
     def _get_known_ips(self) -> list[str]:
         """Get known IPs from fleet.json or defaults."""
