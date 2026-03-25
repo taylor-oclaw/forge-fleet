@@ -80,14 +80,35 @@ class Agent:
                 return f"LLM error: {e}"
             
             tool_calls = response.get("tool_calls", [])
+            content = response.get("content", "")
+            
+            # Parse Qwen-style tool calls from <tools> tags in content
+            if not tool_calls and content and "<tools>" in content:
+                import re
+                tools_match = re.findall(r'<tools>\s*(\{.*?\})\s*</tools>', content, re.DOTALL)
+                if tools_match:
+                    tool_calls = []
+                    for tm in tools_match:
+                        try:
+                            tc_data = json.loads(tm)
+                            tool_calls.append({
+                                "function": {
+                                    "name": tc_data.get("name", ""),
+                                    "arguments": json.dumps(tc_data.get("arguments", {})),
+                                },
+                                "id": f"call_{tc_data.get('name', 'unknown')}",
+                            })
+                        except json.JSONDecodeError:
+                            pass
             
             if tool_calls:
-                msgs.append(response)
+                msgs.append({"role": "assistant", "content": content or ""})
                 
                 for tc in tool_calls:
                     func_name = tc["function"]["name"]
                     try:
-                        args = json.loads(tc["function"]["arguments"])
+                        args_raw = tc["function"]["arguments"]
+                        args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                     except (json.JSONDecodeError, KeyError):
                         args = {}
                     
@@ -105,8 +126,6 @@ class Agent:
                         "content": result[:8000],
                     })
                 continue
-            
-            content = response.get("content", "")
             if content:
                 if self.verbose:
                     print(f"  [{self.role}] Done ({len(content)} chars)")
