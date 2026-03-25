@@ -165,10 +165,25 @@ class SeniorityPipeline:
         return self._build_result(results, time.time() - start)
     
     def _run_level(self, level: Seniority, task: str, context: str, tech_context: str) -> HandoffResult:
-        """Run one seniority level."""
-        config = SENIORITY_CONFIG[level]
+        """Run one seniority level.
         
-        llm = self.router.get_llm(config["tier"])
+        Uses preferred tier but falls back to any available model.
+        A Senior CAN do Junior work if Juniors are busy.
+        Preference order: preferred tier → next tier up → next tier down.
+        """
+        config = SENIORITY_CONFIG[level]
+        preferred_tier = config["tier"]
+        
+        # Try preferred tier first, then fall back
+        llm = self.router.get_llm(preferred_tier)
+        if not llm:
+            # Try one tier up (e.g., use 72B for Junior work if 32B busy)
+            for fallback_tier in [preferred_tier + 1, preferred_tier - 1, preferred_tier + 2]:
+                if 1 <= fallback_tier <= 4:
+                    llm = self.router.get_llm(fallback_tier)
+                    if llm:
+                        print(f"  ℹ️ {config['title']}: using tier {fallback_tier} (preferred {preferred_tier} busy)", flush=True)
+                        break
         if not llm:
             llm = LLM(base_url="http://192.168.5.100:51803/v1")
         
