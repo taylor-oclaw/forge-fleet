@@ -1,0 +1,359 @@
+{
+  "version": "2026-03-23",
+  "description": "SINGLE SOURCE OF TRUTH for all fleet infrastructure. Read by: Taylor, MC, agent.py. Read this FIRST on every session startup.",
+  "inference": {
+    "engine": "llama.cpp",
+    "note": "All inference via llama.cpp. No Ollama. No Kimi.",
+    "cluster": {
+      "model": "Qwen3-235B-A22B (Q4_K_M)",
+      "size": "142GB",
+      "master": "taylor",
+      "port": 8080,
+      "workers": [
+        "james",
+        "marcus",
+        "sophie",
+        "priya"
+      ],
+      "worker_port": 50052,
+      "status": "active"
+    },
+    "standalone_models": {
+      "qwen3.5-9b": {
+        "port_varies": true,
+        "size": "5.3GB",
+        "deployed_on": [
+          "taylor",
+          "james",
+          "ace"
+        ],
+        "ports": {
+          "taylor": 8082,
+          "james": 8083,
+          "ace": 8081
+        },
+        "status": "active"
+      },
+      "qwen2.5-coder-32b": {
+        "port": 8081,
+        "size": "18GB",
+        "deployed_on": [
+          "marcus",
+          "sophie",
+          "priya"
+        ],
+        "status": "active"
+      },
+      "qwen2.5-72b": {
+        "port": 8082,
+        "size": "44GB",
+        "deployed_on": [
+          "james"
+        ],
+        "status": "active"
+      }
+    },
+    "escalation_chain": [
+      "qwen3.5-9b",
+      "qwen2.5-coder-32b",
+      "qwen2.5-72b",
+      "qwen3-235b",
+      "codex",
+      "opus"
+    ],
+    "routing": "Smallest first. 9B (scaffold) \u2192 32B (quality) \u2192 72B (complex) \u2192 235B (hardest) \u2192 Codex \u2192 Taylor",
+    "tiered_pipeline": {
+      "tier1": {
+        "model": "qwen3.5-9b",
+        "role": "scaffold",
+        "nodes": {
+          "taylor": "http://localhost:8082",
+          "james": "http://localhost:8083",
+          "ace": "http://localhost:8081",
+          "marcus": "http://192.168.5.100:8082",
+          "sophie": "http://192.168.5.100:8082",
+          "priya": "http://192.168.5.100:8082"
+        },
+        "fleet_pool": [
+          "http://192.168.5.100:8082",
+          "http://192.168.5.108:8083",
+          "http://192.168.5.104:8081"
+        ]
+      },
+      "tier2": {
+        "model": "qwen2.5-coder-32b",
+        "role": "quality_code",
+        "nodes": {
+          "marcus": "http://localhost:8081",
+          "sophie": "http://localhost:8081",
+          "priya": "http://localhost:8081",
+          "taylor": "http://192.168.5.102:8081",
+          "james": "http://192.168.5.102:8081",
+          "ace": "http://192.168.5.102:8081"
+        },
+        "fleet_pool": [
+          "http://192.168.5.102:8081",
+          "http://192.168.5.103:8081",
+          "http://192.168.5.106:8081"
+        ]
+      },
+      "tier3": {
+        "model": "qwen2.5-72b",
+        "role": "complex_logic",
+        "url": "http://192.168.5.108:8082"
+      },
+      "tier4": {
+        "model": "qwen3-235b",
+        "role": "hardest_tasks",
+        "url": "http://192.168.5.100:8080"
+      },
+      "tier5": {
+        "model": "codex",
+        "role": "paid_fallback",
+        "url": "cli"
+      },
+      "tier6": {
+        "model": "taylor",
+        "role": "break_down_tickets",
+        "url": "manual"
+      }
+    }
+  },
+  "nodes": {
+    "taylor": {
+      "hostname": "Venkats-Mac-Studio",
+      "ip": "192.168.5.100",
+      "alt_ip": "192.168.5.101",
+      "thunderbolt_ip": "10.0.0.1",
+      "ssh_user": "venkat",
+      "os": "macOS 26.3",
+      "arch": "arm64",
+      "ram_gb": 96,
+      "cpu_cores": 32,
+      "gpu": "M3 Ultra (Metal)",
+      "storage": "3.6TB",
+      "role": "gateway",
+      "max_codex_agents": 6,
+      "docker": true,
+      "docker_config": "20 CPU, 32GB RAM",
+      "node_js": "v25.6.1",
+      "openclaw": "2026.3.13",
+      "codex_logged_in": true,
+      "op_logged_in": true,
+      "repo_path": "/Users/venkat/taylorProjects/HireFlow360",
+      "gateway_service": "LaunchAgent (running, port 50000, bind: lan)",
+      "auto_update": "4AM daily + gateway restart",
+      "llama_cpp": {
+        "role": "cluster master + standalone",
+        "models": [
+          "Qwen3.5-9B (standalone, port 8082) \u2014 active",
+          "Qwen3-235B cluster master (port 8080) \u2014 active"
+        ]
+      },
+      "services": {
+        "gateway": "port 50000",
+        "hireflow_frontend": "port 3100",
+        "hireflow_backend": "port 3200",
+        "postgres": "port 5432",
+        "comfyui": "port 8188"
+      }
+    },
+    "james": {
+      "hostname": "James",
+      "ip": "192.168.5.108",
+      "thunderbolt_ip": "10.0.0.2",
+      "ssh_user": "james",
+      "os": "Ubuntu 24.04",
+      "arch": "x86_64",
+      "ram_gb": 64,
+      "cpu_cores": 12,
+      "gpu": "none",
+      "role": "builder",
+      "max_codex_agents": 4,
+      "docker": true,
+      "node_js": "v24",
+      "openclaw": "2026.3.13",
+      "codex_logged_in": true,
+      "op_logged_in": true,
+      "repo_path": "/home/james/taylorProjects/HireFlow360",
+      "node_service": "systemd (enabled + linger, OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1)",
+      "gateway_service": "disabled + masked",
+      "auto_update": "4AM daily",
+      "llama_cpp": {
+        "role": "RPC worker + standalone",
+        "models": [
+          "RPC worker (port 50052)",
+          "Qwen3.5-9B (standalone, port 8083) \u2014 active",
+          "Qwen2.5-72B (standalone, port 8082) \u2014 active"
+        ]
+      },
+      "notes": "Runs Mission Control Docker (ports 60000-60003). Has Thunderbolt."
+    },
+    "marcus": {
+      "hostname": "marcus",
+      "ip": "192.168.5.102",
+      "ssh_user": "marcus",
+      "os": "Ubuntu 24.04",
+      "arch": "x86_64",
+      "ram_gb": 32,
+      "cpu_cores": 8,
+      "gpu": "none",
+      "role": "builder",
+      "max_codex_agents": 3,
+      "docker": false,
+      "node_js": "v24",
+      "openclaw": "2026.3.13",
+      "codex_logged_in": true,
+      "op_logged_in": true,
+      "repo_path": "/home/marcus/taylorProjects/HireFlow360",
+      "node_service": "systemd (enabled + linger, OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1)",
+      "auto_update": "4AM daily",
+      "llama_cpp": {
+        "role": "RPC worker + standalone",
+        "models": [
+          "RPC worker (port 50052)",
+          "Qwen2.5-Coder-32B (standalone, port 8081) \u2014 active"
+        ]
+      }
+    },
+    "sophie": {
+      "hostname": "sophie",
+      "ip": "192.168.5.103",
+      "ssh_user": "sophie",
+      "os": "Ubuntu 24.04",
+      "arch": "x86_64",
+      "ram_gb": 32,
+      "cpu_cores": 8,
+      "gpu": "none",
+      "role": "builder",
+      "max_codex_agents": 3,
+      "docker": false,
+      "node_js": "v24",
+      "openclaw": "2026.3.13",
+      "codex_logged_in": true,
+      "op_logged_in": true,
+      "repo_path": "/home/sophie/taylorProjects/HireFlow360",
+      "node_service": "systemd (enabled + linger, OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1)",
+      "auto_update": "4AM daily",
+      "llama_cpp": {
+        "role": "RPC worker + standalone",
+        "models": [
+          "RPC worker (port 50052)",
+          "Qwen2.5-Coder-32B (standalone, port 8081) \u2014 active"
+        ]
+      }
+    },
+    "priya": {
+      "hostname": "priya",
+      "ip": "192.168.5.106",
+      "ssh_user": "priya",
+      "os": "Ubuntu 24.04",
+      "arch": "x86_64",
+      "ram_gb": 32,
+      "cpu_cores": 8,
+      "gpu": "none",
+      "role": "builder",
+      "max_codex_agents": 3,
+      "docker": true,
+      "node_js": "v24",
+      "openclaw": "2026.3.13",
+      "codex_logged_in": true,
+      "op_logged_in": true,
+      "repo_path": "/home/priya/taylorProjects/HireFlow360",
+      "node_service": "systemd (enabled + linger, OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1, OPENCLAW_GATEWAY_TOKEN set)",
+      "auto_update": "4AM daily",
+      "llama_cpp": {
+        "role": "RPC worker + standalone",
+        "models": [
+          "RPC worker (port 50052)",
+          "Qwen2.5-Coder-32B (standalone, port 8081) \u2014 active"
+        ]
+      }
+    },
+    "ace": {
+      "hostname": "Ace",
+      "ip": "192.168.5.104",
+      "alt_ip": "192.168.5.105",
+      "thunderbolt_ip": "10.0.0.3",
+      "ssh_user": "ace",
+      "os": "macOS 26.3",
+      "arch": "arm64",
+      "ram_gb": 16,
+      "cpu_cores": 10,
+      "gpu": "M4 (Metal)",
+      "role": "builder",
+      "max_codex_agents": 2,
+      "docker": false,
+      "node_js": "v25.8.1",
+      "openclaw": "2026.3.13",
+      "codex_logged_in": true,
+      "op_logged_in": true,
+      "repo_path": "/Users/ace/taylorProjects/HireFlow360",
+      "node_service": "LaunchAgent (RunAtLoad + KeepAlive, OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1, OPENCLAW_GATEWAY_TOKEN set)",
+      "gateway_service": "stopped + plist removed",
+      "auto_update": "4AM daily + weekly brew upgrade",
+      "llama_cpp": {
+        "role": "standalone only",
+        "models": [
+          "Qwen3.5-9B (standalone, port 8081) \u2014 active"
+        ],
+        "notes": "16GB \u2014 only 9B fits. Calls remote 32B/72B/235B."
+      },
+      "notes": "Has Thunderbolt. SSH fixed Mar 17."
+    }
+  },
+  "thunderbolt": {
+    "taylor_james": {
+      "speed": "40 Gb/s",
+      "latency": "0.45ms"
+    },
+    "taylor_ace": {
+      "speed": "40 Gb/s",
+      "latency": "0.33ms"
+    },
+    "james_ace": {
+      "speed": "40 Gb/s",
+      "latency": "0.29ms"
+    }
+  },
+  "common": {
+    "openclaw_version": "2026.3.13",
+    "codex_cli": "logged in on all nodes (ChatGPT Pro OAuth)",
+    "onepassword": "logged in on all nodes",
+    "hireflow_repo": "cloned on all nodes",
+    "ssh": "Taylor can SSH to all nodes",
+    "auto_update": "4AM daily (npm install -g openclaw@latest)",
+    "rdma": "enabled (Mar 22, Venkat did Recovery Mode reboot)"
+  },
+  "agent_config": {
+    "workers_per_node": {
+      "taylor": 3,
+      "james": 4,
+      "marcus": 3,
+      "sophie": 3,
+      "priya": 3,
+      "ace": 2
+    },
+    "total_agents": 21,
+    "worker_types": [
+      "llama-local",
+      "codex"
+    ],
+    "sub_agent_dir": "~/taylorProjects/Sub-agent-{N}/HireFlow360",
+    "preflight_check": true,
+    "post_build_qa": true,
+    "auto_create_review_ticket": true,
+    "git_strategy": "branch per task, review before merge",
+    "builder_cannot_review_own_code": true,
+    "ticket_types": {
+      "build": "Agent builds code, pushes to branch",
+      "review": "Different agent reviews the branch (auto-created after build)",
+      "research": "Agent researches, output goes to Taylor for ticket creation",
+      "fix": "Agent fixes issues from review feedback"
+    },
+    "review_flow": "build completes \u2192 auto-create review ticket \u2192 different node reviews \u2192 Taylor merges or rejects",
+    "research_flow": "research completes \u2192 Taylor reads output \u2192 creates MC tickets \u2192 does NOT commit to branch",
+    "build_pipeline": "tiered",
+    "pipeline_order": "smallest_first"
+  }
+}
