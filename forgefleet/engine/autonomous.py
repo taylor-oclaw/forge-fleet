@@ -43,7 +43,7 @@ class AutonomousWorker:
     7. Learn from outcome
     8. Repeat
     """
-    repo_dir: str = "/Users/venkat/taylorProjects/HireFlow360"
+    repo_dir: str = ""
     mc_url: str = "http://192.168.5.100:60002"
     node_name: str = "taylor-forgefleet"
     poll_interval: int = 30  # seconds between ticket checks

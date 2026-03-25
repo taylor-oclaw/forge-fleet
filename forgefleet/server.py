@@ -213,7 +213,7 @@ class UnifiedHandler(BaseHTTPRequestHandler):
 
 def main():
     port = int(os.environ.get("FORGEFLEET_PORT", "51820"))
-    repo = os.environ.get("FORGEFLEET_REPO", "/Users/venkat/taylorProjects/HireFlow360")
+    repo = os.environ.get("FORGEFLEET_REPO", os.getcwd())
     auto_work = os.environ.get("FORGEFLEET_AUTO_WORK", "true").lower() == "true"
     
     print(f"⚡ ForgeFleet Unified Server starting")

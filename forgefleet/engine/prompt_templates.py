@@ -22,7 +22,7 @@ TEMPLATES = {
     "rust_handler": PromptTemplate(
         name="Rust Axum Handler",
         task_type="rust_handler",
-        system_prompt="""You are a Rust backend developer writing Axum handlers for HireFlow360.
+        system_prompt="""You are a Rust backend developer writing Axum handlers for the current project.
 
 STRICT RULES:
 - Use sqlx::query_as() with explicit SQL strings, NEVER sqlx::query! macros
@@ -54,7 +54,7 @@ STRICT RULES:
     "rust_model": PromptTemplate(
         name="Rust Data Model",
         task_type="rust_model",
-        system_prompt="""You are writing Rust data models (structs) for HireFlow360.
+        system_prompt="""You are writing Rust data models (structs) for the current project.
 
 RULES:
 - #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -70,7 +70,7 @@ RULES:
     "typescript_page": PromptTemplate(
         name="TypeScript/React Page",
         task_type="typescript_page",
-        system_prompt="""You are writing React 18 + TypeScript pages for HireFlow360's Next.js frontend.
+        system_prompt="""You are writing React 18 + TypeScript pages for the current project's Next.js frontend.
 
 RULES:
 - Use 'use client' for interactive pages
@@ -113,7 +113,7 @@ If no issues: say "LGTM ✅" and explain why it's good.""",
     "migration": PromptTemplate(
         name="Database Migration",
         task_type="migration",
-        system_prompt="""You are writing PostgreSQL database migrations for HireFlow360.
+        system_prompt="""You are writing PostgreSQL database migrations for the current project.
 
 RULES:
 - Use standard SQL (no ORM-specific syntax)

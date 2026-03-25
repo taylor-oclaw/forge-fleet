@@ -56,7 +56,7 @@ class DockerSandbox:
             return "node"
         if os.path.exists(os.path.join(self.repo_dir, "pyproject.toml")):
             return "python"
-        return "rust"  # Default for HireFlow360
+        return "rust"  # Default if no package.json or pyproject.toml
     
     def test_changes(self, changed_files: dict, check_command: str = "") -> SandboxResult:
         """Test file changes in a Docker sandbox.

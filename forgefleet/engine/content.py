@@ -1,6 +1,6 @@
 """Content Generator — blog posts, social media, marketing copy.
 
-Generates content for HireFlow360, FierceFlow, MasterStaff, TrustedHire.
+Generates content for any project. Brand voices configurable.
 Uses local LLMs — $0 cost per post.
 """
 import time

@@ -192,7 +192,7 @@ class MCPServer:
                         "repo_dir": {
                             "type": "string",
                             "description": "Path to the repository",
-                            "default": "/Users/venkat/taylorProjects/HireFlow360",
+                            "default": ".",
                         },
                     },
                     "required": ["task"],
