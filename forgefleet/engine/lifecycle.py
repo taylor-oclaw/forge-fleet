@@ -174,9 +174,53 @@ class LifecycleManager:
             self.state.phase = "research" if self._should_research() else "idle"
             return
         
-        # Build one ticket
+        # Pick a ticket — skip EPICs that need decomposition first
         ticket = tickets[0]
-        print(f"  Building: {ticket['title'][:50]}", flush=True)
+        title = ticket.get("title", "")
+        desc = ticket.get("description", title)
+        
+        # Detect if this is an EPIC/feature that needs breakdown
+        is_epic = any(tag in title.upper() for tag in ["[EPIC]", "[FEATURE]", "[CRITICAL]"])
+        is_complex = len(desc) > 500 or any(kw in desc.lower() for kw in ["multiple", "all ", "entire", "complete", "full "])
+        
+        if is_epic or is_complex:
+            print(f"  📋 EPIC detected: {title[:50]} — decomposing first", flush=True)
+            self.notify.send_message(
+                f"📋 ForgeFleet decomposing EPIC: {title[:50]}",
+                silent=True,
+            )
+            
+            from .task_decomposer import TaskDecomposer
+            from .llm import LLM
+            
+            decomposer = TaskDecomposer()
+            subtasks = decomposer.decompose(desc)
+            
+            if len(subtasks) > 1:
+                print(f"  → Decomposed into {len(subtasks)} subtasks", flush=True)
+                
+                # Create subtask tickets in MC
+                for st in subtasks:
+                    mc._request("POST", "/api/work-items", {
+                        "title": st.title,
+                        "description": st.description,
+                        "status": "todo",
+                        "priority": "high",
+                        "parent_id": ticket["id"],
+                    })
+                
+                # Mark the EPIC as in-progress (subtasks will build it)
+                mc.update_ticket(ticket["id"], "in_progress",
+                                result=f"Decomposed into {len(subtasks)} subtasks by ForgeFleet")
+                
+                self.notify.send_message(
+                    f"📋 EPIC decomposed into {len(subtasks)} subtasks:\n" +
+                    "\n".join(f"  • {st.title}" for st in subtasks[:5]),
+                    silent=True,
+                )
+                return  # Next loop iteration will pick up the subtasks
+        
+        print(f"  Building: {title[:50]}", flush=True)
         
         self.resilience.log_build(BuildLog(
             timestamp=datetime.now().isoformat(),
