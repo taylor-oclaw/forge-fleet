@@ -100,12 +100,30 @@ class SeniorityPipeline:
         start = time.time()
         results = []
         
+        # Step 0: If no tech stack provided, have the Intern detect it
+        if not tech_stack or not tech_stack.get("backend"):
+            tech_stack = self._detect_tech_stack()
+        
         tech_context = ""
         if tech_stack:
-            if tech_stack.get("backend") == "Rust + Axum":
-                tech_context = "This is a RUST + Axum + PostgreSQL project. Write RUST code only."
-            if tech_stack.get("frontend"):
-                tech_context += f" Frontend: {tech_stack['frontend']}."
+            backend = tech_stack.get("backend", "")
+            frontend = tech_stack.get("frontend", "")
+            instructions = tech_stack.get("instructions", "")
+            
+            if instructions:
+                tech_context = instructions
+            elif "Rust" in backend:
+                tech_context = (
+                    "MANDATORY: This is a RUST project using Axum + sqlx + PostgreSQL. "
+                    "Write RUST code ONLY. NEVER write Python, Flask, Django, or JavaScript backend code. "
+                    "All Rust files go in rust-backend/crates/CRATE_NAME/src/. "
+                    "Use sqlx::query_as(), TIMESTAMPTZ, UUID."
+                )
+            elif "Python" in backend:
+                tech_context = "This is a Python project. Write Python code."
+            
+            if frontend:
+                tech_context += f" Frontend: {frontend}. Frontend files go in frontend/src/."
         
         # Step 1: INTERN researches
         print(f"\n👶 Intern researching...", flush=True)
@@ -245,6 +263,46 @@ class SeniorityPipeline:
             result.escalation_reason = output
         
         return result
+    
+    def _detect_tech_stack(self) -> dict:
+        """Have a fast LLM review the repo to determine tech stack."""
+        llm_fast = self.router.get_llm(1)
+        if not llm_fast:
+            return {}
+        
+        # Read key project files
+        read_tool = next((t for t in self.tools if t.name == "read_file"), None)
+        list_tool = next((t for t in self.tools if t.name == "list_files"), None)
+        
+        project_info = ""
+        if list_tool:
+            project_info += "Root files:\n" + list_tool.run(directory=".", pattern="") + "\n"
+        if read_tool:
+            # Try reading key config files
+            for f in ["Cargo.toml", "package.json", "requirements.txt", "pyproject.toml"]:
+                content = read_tool.run(filepath=f)
+                if "Not found" not in content:
+                    project_info += f"\n{f}:\n{content[:500]}\n"
+        
+        if not project_info:
+            return {}
+        
+        try:
+            response = llm_fast.call([
+                {"role": "system", "content": "Analyze this project and identify the tech stack. Output JSON: {\"backend\": \"...\", \"frontend\": \"...\", \"database\": \"...\", \"instructions\": \"specific rules for this stack\"}"},
+                {"role": "user", "content": f"What tech stack does this project use?\n\n{project_info[:2000]}"},
+            ])
+            content = response.get("content", "")
+            
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                import json
+                return json.loads(json_match.group())
+        except Exception:
+            pass
+        
+        return {}
     
     def _extract_file_tasks(self, task_description: str, intern_output: str, tech_context: str) -> list[str]:
         """Break a task into individual file-level instructions.
