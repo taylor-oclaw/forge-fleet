@@ -184,41 +184,62 @@ class LifecycleManager:
         is_complex = len(desc) > 500 or any(kw in desc.lower() for kw in ["multiple", "all ", "entire", "complete", "full "])
         
         if is_epic or is_complex:
-            print(f"  📋 EPIC detected: {title[:50]} — decomposing first", flush=True)
-            self.notify.send_message(
-                f"📋 ForgeFleet decomposing EPIC: {title[:50]}",
-                silent=True,
-            )
+            print(f"  📋 Detected: {title[:50]} — decomposing...", flush=True)
             
             from .task_decomposer import TaskDecomposer
             from .llm import LLM
             
             decomposer = TaskDecomposer()
-            subtasks = decomposer.decompose(desc)
+            
+            # Determine level: EPIC → Features, FEATURE → Tickets, else → Subtasks
+            if "[EPIC]" in title.upper():
+                # EPIC → create FEATURES
+                level = "features"
+                child_prefix = "[FEATURE]"
+                prompt = f"Break this EPIC into major FEATURES (not code tasks). Each feature is a significant capability.\n\n{desc}"
+            elif "[FEATURE]" in title.upper() or is_complex:
+                # FEATURE → create TICKETS (buildable tasks)
+                level = "tickets"
+                child_prefix = ""
+                prompt = f"Break this feature into specific coding TICKETS. Each ticket should be one concrete implementation task (one crate, one handler, one model file).\n\n{desc}"
+            else:
+                # Regular complex ticket → create subtasks
+                level = "subtasks"
+                child_prefix = ""
+                prompt = desc
+            
+            subtasks = decomposer.decompose(prompt)
             
             if len(subtasks) > 1:
-                print(f"  → Decomposed into {len(subtasks)} subtasks", flush=True)
+                print(f"  → Created {len(subtasks)} {level}", flush=True)
                 
-                # Create subtask tickets in MC
+                # Create child tickets in MC
+                created_titles = []
                 for st in subtasks:
+                    child_title = f"{child_prefix} {st.title}".strip() if child_prefix else st.title
                     mc._request("POST", "/api/work-items", {
-                        "title": st.title,
+                        "title": child_title,
                         "description": st.description,
                         "status": "todo",
                         "priority": "high",
                         "parent_id": ticket["id"],
                     })
+                    created_titles.append(child_title)
                 
-                # Mark the EPIC as in-progress (subtasks will build it)
+                # Mark parent as in-progress
                 mc.update_ticket(ticket["id"], "in_progress",
-                                result=f"Decomposed into {len(subtasks)} subtasks by ForgeFleet")
+                                result=f"Decomposed into {len(subtasks)} {level} by ForgeFleet")
                 
                 self.notify.send_message(
-                    f"📋 EPIC decomposed into {len(subtasks)} subtasks:\n" +
-                    "\n".join(f"  • {st.title}" for st in subtasks[:5]),
-                    silent=True,
+                    f"📋 ForgeFleet decomposed {'EPIC into FEATURES' if level == 'features' else 'FEATURE into TICKETS' if level == 'tickets' else 'task into subtasks'}:\n\n"
+                    f"Parent: {title[:50]}\n\n" +
+                    "\n".join(f"  {'🏗️' if level == 'features' else '📋'} {t[:55]}" for t in created_titles[:7]) +
+                    (f"\n  ... and {len(created_titles)-7} more" if len(created_titles) > 7 else ""),
                 )
-                return  # Next loop iteration will pick up the subtasks
+                return  # Next iteration picks up the children
+            
+            # If decomposer returned 1 or 0 subtasks, treat as buildable
+            print(f"  → Not decomposable, building directly", flush=True)
         
         print(f"  Building: {title[:50]}", flush=True)
         
