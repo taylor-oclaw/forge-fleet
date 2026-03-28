@@ -265,44 +265,154 @@ class SeniorityPipeline:
         return result
     
     def _detect_tech_stack(self) -> dict:
-        """Have a fast LLM review the repo to determine tech stack."""
-        llm_fast = self.router.get_llm(1)
-        if not llm_fast:
-            return {}
+        """Detect tech stack from repo files — supports ALL major stacks."""
+        import json as _json
         
-        # Read key project files
         read_tool = next((t for t in self.tools if t.name == "read_file"), None)
         list_tool = next((t for t in self.tools if t.name == "list_files"), None)
         
-        project_info = ""
-        if list_tool:
-            project_info += "Root files:\n" + list_tool.run(directory=".", pattern="") + "\n"
-        if read_tool:
-            # Try reading key config files
-            for f in ["Cargo.toml", "package.json", "requirements.txt", "pyproject.toml"]:
-                content = read_tool.run(filepath=f)
-                if "Not found" not in content:
-                    project_info += f"\n{f}:\n{content[:500]}\n"
-        
-        if not project_info:
+        if not read_tool:
             return {}
         
-        try:
-            response = llm_fast.call([
-                {"role": "system", "content": "Analyze this project and identify the tech stack. Output JSON: {\"backend\": \"...\", \"frontend\": \"...\", \"database\": \"...\", \"instructions\": \"specific rules for this stack\"}"},
-                {"role": "user", "content": f"What tech stack does this project use?\n\n{project_info[:2000]}"},
-            ])
-            content = response.get("content", "")
-            
-            import re
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                import json
-                return json.loads(json_match.group())
-        except Exception:
-            pass
+        stack = {"backend": "", "frontend": "", "database": "", "instructions": ""}
         
-        return {}
+        # Check ALL common project config files
+        config_files = {
+            "Cargo.toml": "rust",
+            "package.json": "node",
+            "requirements.txt": "python",
+            "pyproject.toml": "python",
+            "Pipfile": "python",
+            "pom.xml": "java",
+            "build.gradle": "java",
+            "build.gradle.kts": "kotlin",
+            "go.mod": "go",
+            "Gemfile": "ruby",
+            "mix.exs": "elixir",
+            "composer.json": "php",
+            "Program.cs": "csharp",
+            "*.csproj": "csharp",
+        }
+        
+        detected_langs = []
+        project_info = ""
+        
+        for config_file, lang in config_files.items():
+            content = read_tool.run(filepath=config_file)
+            if "Not found" not in content:
+                detected_langs.append(lang)
+                project_info += f"\n{config_file}:\n{content[:300]}\n"
+        
+        # Also check directory structure
+        if list_tool:
+            root_files = list_tool.run(directory=".", pattern="")
+            project_info = f"Root files:\n{root_files}\n" + project_info
+        
+        # Determine stack from detected files
+        if "rust" in detected_langs:
+            stack["backend"] = "Rust"
+            # Read Cargo.toml for framework
+            cargo = read_tool.run(filepath="Cargo.toml")
+            if "axum" in cargo.lower():
+                stack["backend"] = "Rust + Axum"
+            elif "actix" in cargo.lower():
+                stack["backend"] = "Rust + Actix"
+            elif "rocket" in cargo.lower():
+                stack["backend"] = "Rust + Rocket"
+            stack["instructions"] = (
+                "MANDATORY: This is a RUST project. Write RUST code ONLY. "
+                "NEVER write Python, Java, JavaScript backend, or any other language. "
+                "Rust files go in rust-backend/crates/CRATE_NAME/src/."
+            )
+        
+        elif "java" in detected_langs:
+            stack["backend"] = "Java"
+            if read_tool.run(filepath="pom.xml") and "spring" in read_tool.run(filepath="pom.xml").lower():
+                stack["backend"] = "Java + Spring Boot"
+            stack["instructions"] = "This is a JAVA project. Write Java code. Use Maven/Gradle conventions."
+        
+        elif "python" in detected_langs:
+            stack["backend"] = "Python"
+            reqs = read_tool.run(filepath="requirements.txt")
+            if "django" in reqs.lower():
+                stack["backend"] = "Python + Django"
+            elif "flask" in reqs.lower():
+                stack["backend"] = "Python + Flask"
+            elif "fastapi" in reqs.lower():
+                stack["backend"] = "Python + FastAPI"
+            stack["instructions"] = "This is a PYTHON project. Write Python code."
+        
+        elif "go" in detected_langs:
+            stack["backend"] = "Go"
+            stack["instructions"] = "This is a GO project. Write Go code."
+        
+        elif "ruby" in detected_langs:
+            stack["backend"] = "Ruby"
+            stack["instructions"] = "This is a RUBY project. Write Ruby code."
+        
+        elif "csharp" in detected_langs:
+            stack["backend"] = "C# / .NET"
+            stack["instructions"] = "This is a C#/.NET project. Write C# code."
+        
+        # Frontend detection
+        if "node" in detected_langs:
+            try:
+                pkg_content = read_tool.run(filepath="package.json")
+                pkg = _json.loads(pkg_content) if pkg_content and "Not found" not in pkg_content else {}
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                
+                if "next" in deps:
+                    stack["frontend"] = "Next.js + React + TypeScript"
+                elif "nuxt" in deps:
+                    stack["frontend"] = "Nuxt + Vue"
+                elif "react" in deps:
+                    stack["frontend"] = "React"
+                    if "typescript" in deps:
+                        stack["frontend"] += " + TypeScript"
+                elif "vue" in deps:
+                    stack["frontend"] = "Vue.js"
+                elif "angular" in " ".join(deps.keys()).lower():
+                    stack["frontend"] = "Angular"
+                elif "svelte" in deps:
+                    stack["frontend"] = "Svelte"
+                
+                if not stack["backend"] and ("express" in deps or "koa" in deps or "fastify" in deps):
+                    stack["backend"] = "Node.js"
+                    if "express" in deps: stack["backend"] += " + Express"
+                    elif "fastify" in deps: stack["backend"] += " + Fastify"
+                    stack["instructions"] = "This is a Node.js project. Write JavaScript/TypeScript."
+            except:
+                pass
+        
+        # Database detection from docker-compose or config
+        for compose in ["docker-compose.yml", "docker-compose.yaml"]:
+            dc = read_tool.run(filepath=compose)
+            if "Not found" not in dc:
+                dc_lower = dc.lower()
+                if "postgres" in dc_lower: stack["database"] = "PostgreSQL"
+                elif "mysql" in dc_lower: stack["database"] = "MySQL"
+                elif "mongo" in dc_lower: stack["database"] = "MongoDB"
+                elif "redis" in dc_lower and not stack["database"]: stack["database"] = "Redis"
+                elif "sqlserver" in dc_lower or "mssql" in dc_lower: stack["database"] = "SQL Server"
+                break
+        
+        # If we still couldn't determine, use LLM
+        if not stack["backend"] and not stack["frontend"] and project_info:
+            llm_fast = self.router.get_llm(1)
+            if llm_fast:
+                try:
+                    response = llm_fast.call([
+                        {"role": "system", "content": "Identify the tech stack. Output JSON: {\"backend\": \"...\", \"frontend\": \"...\", \"database\": \"...\", \"instructions\": \"...\"}"},
+                        {"role": "user", "content": f"Project files:\n{project_info[:2000]}"},
+                    ])
+                    import re
+                    m = re.search(r'\{.*\}', response.get("content", ""), re.DOTALL)
+                    if m:
+                        return _json.loads(m.group())
+                except:
+                    pass
+        
+        return stack
     
     def _extract_file_tasks(self, task_description: str, intern_output: str, tech_context: str) -> list[str]:
         """Break a task into individual file-level instructions.
