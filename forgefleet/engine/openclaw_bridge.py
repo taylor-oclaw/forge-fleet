@@ -17,7 +17,7 @@ class OpenClawBridge:
     def __post_init__(self):
         if not self.chat_id:
             from forgefleet import config
-            self.chat_id = config.TELEGRAM_CHAT_ID
+            self.chat_id = config.get_telegram_config().get("chat_id", "")
     """Send notifications and messages through OpenClaw's gateway.
     
     Uses the gateway's internal API to send Telegram messages

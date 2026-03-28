@@ -18,7 +18,7 @@ class MCClient:
     def __post_init__(self):
         if not self.base_url:
             from forgefleet import config
-            self.base_url = config.MC_URL
+            self.base_url = config.get_mc_url()
     """Client for the Mission Control API.
     
     MC runs on Taylor at port 60002.
