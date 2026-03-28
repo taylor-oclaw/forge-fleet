@@ -27,6 +27,7 @@ from .gap_analyzer import GapAnalyzer
 from .task_decomposer import TaskDecomposer
 from .skill_loader import SkillLoader
 from .scheduler import AutoScheduler, SchedulerConfig
+from .openclaw_bridge import OpenClawBridge
 
 
 @dataclass
@@ -62,6 +63,7 @@ class AutonomousWorker:
         config=SchedulerConfig(idle_short_seconds=300, night_start_hour=23, night_end_hour=8)
     ))
     
+    notify: OpenClawBridge = field(default_factory=OpenClawBridge)
     _running: bool = False
     _tasks_completed: int = 0
     
@@ -119,6 +121,15 @@ class AutonomousWorker:
                 if success:
                     self._tasks_completed += 1
                     print(f"  ✅ Task #{self._tasks_completed} complete")
+                    self.notify.send_message(
+                        f"✅ [{self.node_name}] Built: {ticket.get('title', '')[:40]}",
+                        silent=True,
+                    )
+                else:
+                    self.notify.send_message(
+                        f"❌ [{self.node_name}] Failed: {ticket.get('title', '')[:40]}",
+                        silent=True,
+                    )
                 
             except KeyboardInterrupt:
                 break
