@@ -211,17 +211,31 @@ class LifecycleManager:
             if len(subtasks) > 1:
                 print(f"  → Created {len(subtasks)} {level}", flush=True)
                 
-                # Create child tickets in MC
+                # Create child tickets with DEPENDENCY ordering
                 created_titles = []
-                for st in subtasks:
+                prev_ticket_id = None
+                
+                for i, st in enumerate(subtasks):
                     child_title = f"{child_prefix} {st.title}".strip() if child_prefix else st.title
-                    mc._request("POST", "/api/work-items", {
+                    
+                    # First ticket is todo, rest are blocked (depend on previous)
+                    child_status = "todo" if i == 0 else "blocked"
+                    child_desc = st.description
+                    if prev_ticket_id and i > 0:
+                        child_desc += f"\n\nDepends on: {created_titles[-1] if created_titles else 'previous task'}"
+                    
+                    result = mc._request("POST", "/api/work-items", {
                         "title": child_title,
-                        "description": st.description,
-                        "status": "todo",
+                        "description": child_desc,
+                        "status": child_status,
                         "priority": "high",
                         "parent_id": ticket["id"],
                     })
+                    
+                    # Track the created ticket ID for dependency chain
+                    if isinstance(result, dict) and "id" in result:
+                        prev_ticket_id = result["id"]
+                    
                     created_titles.append(child_title)
                 
                 # Mark parent as in-progress
@@ -276,8 +290,17 @@ class LifecycleManager:
             status="completed" if success else "failed",
         ))
         
-        # Transition: after N tasks, analyze
-        if self.state.tasks_since_last_analyze >= self.ANALYZE_EVERY_N_TASKS:
+        # Transition logic:
+        # If 3+ consecutive failures → immediately analyze + self-update
+        recent_failures = len([fid for fid in self.state.failed_task_ids[-3:]])
+        if recent_failures >= 3:
+            print(f"  ⚠️ 3+ consecutive failures — triggering analysis + self-update", flush=True)
+            self.notify.send_message(
+                f"⚠️ ForgeFleet: 3+ failures detected. Analyzing and self-updating...",
+                silent=True,
+            )
+            self.state.phase = "learn"
+        elif self.state.tasks_since_last_analyze >= self.ANALYZE_EVERY_N_TASKS:
             self.state.phase = "learn"
         # Otherwise keep working
     
