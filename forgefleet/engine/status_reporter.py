@@ -172,12 +172,65 @@ class StatusReporter:
         except:
             pass
         
-        # Evolution stats
+        # Evolution stats + top errors
         try:
             from .evolution import EvolutionEngine
             evo = EvolutionEngine()
             rate = evo._overall_success_rate()
             lines.append(f"\n📈 Success rate: {rate}")
+            
+            # Top error patterns
+            errors = evo.get_error_patterns(3) if hasattr(evo, 'get_error_patterns') else []
+            if errors:
+                lines.append("  Top errors:")
+                for e in errors[:3]:
+                    lines.append(f"    {e.get('count', '?')}x: {e.get('error', '?')[:50]}")
+            evo.close()
+        except:
+            pass
+        
+        # Resource usage per node
+        try:
+            from forgefleet import config as ff_config
+            resources = []
+            for name in list(ff_config.get_nodes().keys())[:6]:
+                ip = ff_config.get_node_ip(name)
+                try:
+                    r = subprocess.run(
+                        ["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", ip,
+                         "free -g 2>/dev/null | grep Mem | awk '{print $3\"/\"$2\"GB\"}' || "
+                         "vm_stat 2>/dev/null | head -1"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    mem = r.stdout.strip()[:15] if r.stdout.strip() else "?"
+                    
+                    r2 = subprocess.run(
+                        ["ssh", "-o", "ConnectTimeout=3", ip,
+                         "uptime | grep -oP 'load average: \\K[^ ]+' 2>/dev/null || "
+                         "uptime | awk -F'load averages:' '{print $2}' | awk '{print $1}'"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    load = r2.stdout.strip()[:5] if r2.stdout.strip() else "?"
+                    
+                    resources.append(f"{name}:{mem},load={load}")
+                except:
+                    resources.append(f"{name}:?")
+            
+            lines.append(f"\n💻 Resources: {' | '.join(resources)}")
+        except:
+            pass
+        
+        # Self-update history
+        try:
+            from .evolution import EvolutionEngine
+            evo = EvolutionEngine()
+            proposals = evo.db.execute(
+                "SELECT title, status FROM version_proposals ORDER BY created_at DESC LIMIT 3"
+            ).fetchall()
+            if proposals:
+                lines.append(f"\n🔧 Self-updates:")
+                for p in proposals:
+                    lines.append(f"  {p[1]}: {p[0][:50]}")
             evo.close()
         except:
             pass
