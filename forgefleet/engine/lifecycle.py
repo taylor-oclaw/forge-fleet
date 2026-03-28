@@ -131,6 +131,12 @@ class LifecycleManager:
                     print(f"  🔧 Restarted LLMs: {restarted}", flush=True)
                     time.sleep(10)
                 
+                # Send periodic status report to Telegram
+                from .status_reporter import StatusReporter
+                reporter = StatusReporter()
+                if reporter.should_send(interval_seconds=3600):
+                    reporter.send_report()
+                
                 # Check Docker services (MC, HireFlow backend)
                 from .docker_monitor import DockerMonitor
                 docker = DockerMonitor()
