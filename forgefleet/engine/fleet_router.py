@@ -258,7 +258,7 @@ class FleetRouter:
         llm = self.get_llm(tier)
         if llm is None:
             # Nothing available at any tier — use a hardcoded fallback
-            llm = LLM(base_url="http://192.168.5.100:51803/v1", model="fallback")
+            from forgefleet import config; llm = LLM(base_url=f"http://{config.get_node_ip("taylor") or "localhost"}:51803/v1", model="fallback")
         
         return llm
     

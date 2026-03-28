@@ -14,13 +14,17 @@ from dataclasses import dataclass
 
 @dataclass
 class OpenClawBridge:
+    def __post_init__(self):
+        if not self.chat_id:
+            from forgefleet import config
+            self.chat_id = config.TELEGRAM_CHAT_ID
     """Send notifications and messages through OpenClaw's gateway.
     
     Uses the gateway's internal API to send Telegram messages
     without needing a separate bot token.
     """
     gateway_url: str = "http://localhost:50000"
-    chat_id: str = "8496613333"  # Venkat's Telegram
+    chat_id: str = ""
     channel: str = "telegram"
     
     def send_message(self, text: str, silent: bool = False) -> bool:

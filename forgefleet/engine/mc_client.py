@@ -15,11 +15,15 @@ from typing import Optional
 
 @dataclass
 class MCClient:
+    def __post_init__(self):
+        if not self.base_url:
+            from forgefleet import config
+            self.base_url = config.MC_URL
     """Client for the Mission Control API.
     
     MC runs on Taylor at port 60002.
     """
-    base_url: str = "http://192.168.5.100:60002"
+    base_url: str = ""
     node_name: str = ""
     timeout: int = 15
     
