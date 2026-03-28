@@ -290,8 +290,10 @@ class LifecycleManager:
             status="completed" if success else "failed",
         ))
         
+        # After every task, check if there are branches to review + merge
+        self._review_and_merge()
+        
         # Transition logic:
-        # If 3+ consecutive failures → immediately analyze + self-update
         recent_failures = len([fid for fid in self.state.failed_task_ids[-3:]])
         if recent_failures >= 3:
             print(f"  ⚠️ 3+ consecutive failures — triggering analysis + self-update", flush=True)
@@ -419,6 +421,95 @@ class LifecycleManager:
         
         self.state.phase = "work"
         self.state.total_cycles += 1
+    
+    def _review_and_merge(self):
+        """Review ready branches and merge approved ones to main."""
+        import subprocess
+        
+        if not self.worker:
+            return
+        
+        repo = self.worker.repo_dir
+        
+        # Get ready_for_review tickets with branches
+        from .mc_client import MCClient
+        mc = MCClient()
+        review_tickets = mc.get_tickets(status="ready_for_review")
+        
+        if not review_tickets:
+            return
+        
+        print(f"  🔍 Reviewing {len(review_tickets)} branches...", flush=True)
+        
+        # Get the review LLM (72B)
+        llm = self.router.get_llm(3)
+        if not llm:
+            return
+        
+        merged = 0
+        for ticket in review_tickets[:5]:  # Review 5 per cycle
+            tid = ticket["id"]
+            title = ticket["title"]
+            
+            # Find branch
+            branches = subprocess.run(
+                ["git", "branch", "-r"], capture_output=True, text=True, cwd=repo
+            ).stdout
+            
+            branch = None
+            for line in branches.split("\n"):
+                if tid[:8] in line:
+                    branch = line.strip()
+                    break
+            
+            if not branch:
+                continue
+            
+            # Get diff
+            diff = subprocess.run(
+                ["git", "diff", f"main..{branch}"],
+                capture_output=True, text=True, cwd=repo, timeout=10
+            ).stdout[:4000]
+            
+            if not diff.strip():
+                continue
+            
+            # Auto-reject Python in Rust project
+            if "from flask" in diff or "import flask" in diff:
+                continue
+            
+            # Quick review with LLM
+            try:
+                response = llm.call([
+                    {"role": "system", "content": "Review this code diff. Say APPROVE or list issues. Be brief."},
+                    {"role": "user", "content": f"Ticket: {title}\n\n{diff[:3000]}"},
+                ])
+                review = response.get("content", "")
+                
+                if any(w in review.upper() for w in ["APPROVE", "LGTM", "LOOKS GOOD"]):
+                    # Merge
+                    subprocess.run(["git", "checkout", "main"], capture_output=True, cwd=repo)
+                    result = subprocess.run(
+                        ["git", "merge", branch, "--no-edit"],
+                        capture_output=True, text=True, cwd=repo
+                    )
+                    
+                    if result.returncode == 0:
+                        merged += 1
+                        mc.update_ticket(tid, "done", result="Reviewed + merged by ForgeFleet")
+                        self.notify.send_message(
+                            f"✅ Reviewed + merged: {title[:40]}",
+                            silent=True,
+                        )
+                    else:
+                        subprocess.run(["git", "merge", "--abort"], capture_output=True, cwd=repo)
+            except Exception:
+                pass
+        
+        # Push merged main
+        if merged > 0:
+            subprocess.run(["git", "push", "origin", "main"], capture_output=True, cwd=repo)
+            print(f"  ✅ Merged {merged} branches to main", flush=True)
     
     def _phase_idle(self):
         """Nothing to do — wait and check periodically."""
