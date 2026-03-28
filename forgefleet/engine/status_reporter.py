@@ -56,8 +56,10 @@ class StatusReporter:
             for name in config.get_nodes():
                 ip = config.get_node_ip(name)
                 try:
+                    ssh_user = ff_config.get_node(name).get('ssh_user', '')
+                    target = f"{ssh_user}@{ip}" if ssh_user else ip
                     r = subprocess.run(
-                        ["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", ip,
+                        ["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", target,
                          "systemctl --user is-active forgefleet-agent 2>/dev/null || "
                          "ps aux | grep forgefleet_subagent | grep -v grep | wc -l"],
                         capture_output=True, text=True, timeout=5,
