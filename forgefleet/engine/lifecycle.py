@@ -26,6 +26,7 @@ from .resilience import ResilienceManager, BuildLog
 from .research import ResearchEngine
 from .continuous_improvement import ContinuousImprover
 from .scheduler import AutoScheduler, ActivityState
+from .openclaw_bridge import OpenClawBridge
 
 
 class Phase(Enum):
@@ -102,6 +103,7 @@ class LifecycleManager:
         self.researcher = ResearchEngine()
         self.improver = ContinuousImprover()
         self.scheduler = AutoScheduler()
+        self.notify = OpenClawBridge()
         self._running = False
     
     def run(self):
@@ -191,6 +193,19 @@ class LifecycleManager:
         if not success:
             self.state.failed_task_ids.append(ticket["id"])
         
+        # Notify via Telegram
+        if success:
+            self.notify.send_message(
+                f"✅ ForgeFleet built: {ticket['title'][:50]}\n"
+                f"Task #{self.state.tasks_since_last_analyze} this cycle",
+                silent=True,
+            )
+        else:
+            self.notify.send_message(
+                f"❌ ForgeFleet failed: {ticket['title'][:50]}",
+                silent=True,
+            )
+        
         self.resilience.log_build(BuildLog(
             timestamp=datetime.now().isoformat(),
             ticket_id=ticket["id"],
@@ -243,8 +258,19 @@ class LifecycleManager:
             if r.deployed:
                 print(f"  ✅ Deployed: {r.fix_description[:50]}", flush=True)
                 self.state.last_self_update = time.time()
+                self.notify.send_message(
+                    f"🔧 ForgeFleet SELF-UPDATE deployed!\n\n"
+                    f"Problem: {r.insight[:100]}\n"
+                    f"Fix: {r.fix_description[:100]}\n"
+                    f"Files changed: {r.files_changed}",
+                )
             elif r.reverted:
                 print(f"  ↩️ Reverted: {r.error[:50]}", flush=True)
+                self.notify.send_message(
+                    f"↩️ ForgeFleet self-update REVERTED\n"
+                    f"Reason: {r.error[:100]}",
+                    silent=True,
+                )
             else:
                 print(f"  ⚠️ No change: {r.error[:50]}", flush=True)
         

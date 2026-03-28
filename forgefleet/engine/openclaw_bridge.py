@@ -24,25 +24,20 @@ class OpenClawBridge:
     channel: str = "telegram"
     
     def send_message(self, text: str, silent: bool = False) -> bool:
-        """Send a message via OpenClaw gateway."""
+        """Send a message via OpenClaw CLI."""
+        import subprocess
         try:
-            data = json.dumps({
-                "action": "send",
-                "channel": self.channel,
-                "target": self.chat_id,
-                "message": text,
-                "silent": silent,
-            }).encode()
+            cmd = [
+                "openclaw", "message", "send",
+                "--target", self.chat_id,
+                "--channel", self.channel,
+                "--message", text,
+            ]
+            if silent:
+                cmd.append("--silent")
             
-            req = urllib.request.Request(
-                f"{self.gateway_url}/api/message",
-                data=data,
-                headers={"Content-Type": "application/json"},
-            )
-            
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read())
-                return result.get("ok", False)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            return r.returncode == 0
         except Exception:
             return False
     
