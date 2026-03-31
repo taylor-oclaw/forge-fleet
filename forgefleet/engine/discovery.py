@@ -1,11 +1,10 @@
 """Network Discovery — auto-discover LLM endpoints on the local network.
 
 Scans the local subnet for llama.cpp / Ollama / vLLM servers.
-No fleet.json needed — finds everything automatically.
+No static JSON inventory needed — finds everything automatically.
 Also handles model installation and updates on new nodes.
 """
 import json
-import os
 import socket
 import subprocess
 import time
@@ -14,6 +13,8 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
+
+from .. import config
 
 
 # ─── Per-tier timeout configuration ────────────────────
@@ -61,8 +62,8 @@ class NetworkDiscovery:
     """Discovers LLM servers on the local network automatically.
     
     Scan methods:
-    1. Known ports scan (8080-8083) on local subnet
-    2. Fleet.json augmentation (if available)
+    1. Known ports scan (51800-51803) on local subnet
+    2. Canonical config augmentation (fleet.toml)
     3. mDNS/Bonjour discovery (future)
     
     When a new endpoint is found:
@@ -229,7 +230,7 @@ class NetworkDiscovery:
     def scan_known_hosts(self, hosts: list[str] = None) -> list[DiscoveredEndpoint]:
         """Quick scan of known hosts only (faster than full subnet scan).
         
-        If no hosts provided, reads from fleet.json or uses defaults.
+        If no hosts provided, reads from canonical config or uses defaults.
         Deduplicates endpoints from alternate IPs (WiFi, Thunderbolt, etc.).
         """
         if hosts is None:
@@ -261,12 +262,12 @@ class NetworkDiscovery:
         """Remove duplicate endpoints from alternate network interfaces.
         
         Two endpoints are duplicates if they serve the same model
-        on the same port but different IPs. We keep the primary IP
-        (from fleet.json) and discard alternates.
+        on the same port but different IPs. We keep the canonical IP
+        (from config) and discard alternates.
         
         Also handles: Ace (.104 + .105), Priya (.106 + .55 + .54 + .252 + .96 + .99 + .51)
         """
-        # Build a map of known alt IPs → primary IP from fleet.json
+        # Build a map of known alt IPs → canonical IP from config
         alt_ip_map = self._get_alt_ip_map()
         
         # Group by (canonical_ip, port)
@@ -287,58 +288,33 @@ class NetworkDiscovery:
         return list(seen.values())
     
     def _get_alt_ip_map(self) -> dict:
-        """Build a map of alternate IPs → primary IP from fleet.json.
-        
-        Returns dict like: {"192.168.5.105": "192.168.5.104", ...}
-        """
+        """Build a map of alternate IPs → canonical IP from fleet.toml config."""
         alt_map = {}
-        
-        for path in [
-            os.path.expanduser("~/fleet.json"),
-            os.path.expanduser("~/.openclaw/workspace/fleet.json"),
-        ]:
-            if os.path.exists(path):
-                try:
-                    with open(path) as f:
-                        fleet = json.load(f)
-                    
-                    for node_name, node in fleet.get("nodes", {}).items():
-                        primary_ip = node.get("ip", "")
-                        
-                        # Map alt_ip to primary
-                        alt_ip = node.get("alt_ip", "")
-                        if alt_ip:
-                            alt_map[alt_ip] = primary_ip
-                        
-                        # Map any additional alt_ips list
-                        for alt in node.get("alt_ips", []):
-                            if alt:
-                                alt_map[alt] = primary_ip
-                    
-                    break
-                except Exception:
-                    pass
-        
+        for node in config.get_nodes().values():
+            primary_ip = node.get("ip", "")
+            if not primary_ip:
+                continue
+
+            alt_ip = node.get("alt_ip", "")
+            if alt_ip:
+                alt_map[alt_ip] = primary_ip
+
+            for alt in node.get("alt_ips", []):
+                if alt:
+                    alt_map[alt] = primary_ip
+
         return alt_map
-    
+
     def _get_known_ips(self) -> list[str]:
-        """Get known IPs from fleet.json or defaults."""
-        for path in [
-            os.path.expanduser("~/fleet.json"),
-            os.path.expanduser("~/.openclaw/workspace/fleet.json"),
-        ]:
-            if os.path.exists(path):
-                try:
-                    with open(path) as f:
-                        fleet = json.load(f)
-                    return [
-                        node.get("ip", "")
-                        for node in fleet.get("nodes", {}).values()
-                        if node.get("ip")
-                    ]
-                except Exception:
-                    pass
-        
+        """Get known IPs from canonical config or defaults."""
+        configured = [
+            node.get("ip", "")
+            for node in config.get_nodes().values()
+            if node.get("ip")
+        ]
+        if configured:
+            return configured
+
         # Default fleet IPs
         return [
             "192.168.5.100", "192.168.5.102", "192.168.5.103",
@@ -453,46 +429,23 @@ class NetworkDiscovery:
         
         return result
     
-    def update_fleet_json(self, fleet_path: str = None):
-        """Update fleet.json with discovered endpoints.
-        
-        Merges discovered endpoints into existing fleet.json,
-        adding new nodes and models without overwriting existing config.
-        """
-        if fleet_path is None:
-            fleet_path = os.path.expanduser("~/.openclaw/workspace/fleet.json")
-        
-        if not os.path.exists(fleet_path):
-            return
-        
-        with open(fleet_path) as f:
-            fleet = json.load(f)
-        
-        # Group discovered endpoints by IP
-        by_ip = {}
+    def update_config_discovery_cache(self) -> dict:
+        """Return discovered endpoint summaries for optional config persistence."""
+        by_ip: dict[str, list[dict]] = {}
         for ep in self.discovered:
-            if ep.ip not in by_ip:
-                by_ip[ep.ip] = []
-            by_ip[ep.ip].append(ep)
-        
-        # Merge into fleet.json
-        for node_name, node in fleet.get("nodes", {}).items():
-            node_ip = node.get("ip", "")
-            if node_ip in by_ip:
-                # Update llama_cpp.models with discovered info
-                if "llama_cpp" not in node:
-                    node["llama_cpp"] = {}
-                
-                discovered_models = []
-                for ep in by_ip[node_ip]:
-                    model_str = (
-                        f"{ep.model_name} (port {ep.port}, "
-                        f"ctx {ep.ctx_size}, tier {ep.tier}) — active"
-                    )
-                    discovered_models.append(model_str)
-                
-                node["llama_cpp"]["discovered_models"] = discovered_models
-                node["llama_cpp"]["last_scan"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        
-        with open(fleet_path, "w") as f:
-            json.dump(fleet, f, indent=2)
+            by_ip.setdefault(ep.ip, []).append({
+                "model": ep.model_name,
+                "port": ep.port,
+                "ctx_size": ep.ctx_size,
+                "tier": ep.tier,
+            })
+
+        return {
+            "last_scan": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "nodes": by_ip,
+        }
+
+    def update_fleet_json(self, fleet_path: str = None):
+        """Backward-compatible alias that now returns discovery cache metadata."""
+        _ = fleet_path  # kept for API compatibility
+        return self.update_config_discovery_cache()

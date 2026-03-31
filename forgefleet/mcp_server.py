@@ -183,7 +183,7 @@ class MCPServer:
                 },
             },
             "fleet_config": {
-                "description": "Get or set ForgeFleet configuration. Single source of truth for all fleet data — nodes, services, notifications, ports. Other services (OpenClaw, MC, Claude) should query this instead of reading fleet.json directly.",
+                "description": "Get or set ForgeFleet configuration. Single source of truth for all fleet data — nodes, services, notifications, ports. Other services (OpenClaw, MC, Claude) should query this instead of reading fleet.toml directly.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

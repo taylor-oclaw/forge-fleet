@@ -310,7 +310,7 @@ class SelfUpdater:
         import socket
         local_ip = self._get_local_ip()
         
-        # Find model path from fleet.json or known paths
+        # Find model path from configured ports or known defaults
         model_paths = {
             51803: "models/qwen3.5-9b/Qwen3.5-9B-Q4_K_M.gguf",
             51802: "models/qwen2.5-coder-32b/Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
@@ -356,15 +356,15 @@ class SelfUpdater:
         except: return "127.0.0.1"
     
     def _get_ssh_user(self, ip: str) -> str:
-        """Get SSH user for an IP from fleet.json."""
+        """Get SSH user for an IP from canonical config."""
         try:
-            fleet_path = os.path.expanduser("~/.openclaw/workspace/fleet.json")
-            with open(fleet_path) as f:
-                fleet = json.load(f)
-            for node in fleet.get("nodes", {}).values():
+            from .. import config
+
+            for node in config.get_nodes().values():
                 if node.get("ip") == ip:
                     return node.get("ssh_user", "")
-        except: pass
+        except Exception:
+            pass
         return ""
     
     def _build_tools(self) -> list:

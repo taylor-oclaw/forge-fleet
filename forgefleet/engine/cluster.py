@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
+from .. import config
+
 
 # Model size estimates (Q4_K_M quantization)
 MODEL_SIZES_GB = {
@@ -81,34 +83,18 @@ class ClusterManager:
     """
     fleet_path: str = ""
     clusters: dict = field(default_factory=dict)  # name -> Cluster
-    
-    def __post_init__(self):
-        if not self.fleet_path:
-            for path in [
-                os.path.expanduser("~/fleet.json"),
-                os.path.expanduser("~/.openclaw/workspace/fleet.json"),
-            ]:
-                if os.path.exists(path):
-                    self.fleet_path = path
-                    break
-    
+
     def get_fleet_nodes(self) -> list[ClusterNode]:
-        """Load available nodes from fleet.json."""
+        """Load available nodes from canonical fleet.toml configuration."""
         nodes = []
-        if not self.fleet_path or not os.path.exists(self.fleet_path):
-            return nodes
-        
-        with open(self.fleet_path) as f:
-            fleet = json.load(f)
-        
-        for name, info in fleet.get("nodes", {}).items():
+        for name, info in config.get_nodes().items():
             nodes.append(ClusterNode(
                 name=name,
                 ip=info.get("ip", ""),
                 ssh_user=info.get("ssh_user", name),
                 ram_gb=info.get("ram_gb", 0),
             ))
-        
+
         return nodes
     
     def estimate_model_size(self, model_name: str) -> float:

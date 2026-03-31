@@ -120,20 +120,44 @@ def get_bootstrap_targets() -> list:
 def get_database() -> dict:
     return get("database", {})
 
+
+def _is_production_env() -> bool:
+    env = (
+        os.environ.get("FORGEFLEET_ENV")
+        or os.environ.get("FORGEFLEET_ENVIRONMENT")
+        or os.environ.get("ENV")
+        or os.environ.get("ENVIRONMENT")
+        or ""
+    )
+    return env.lower() in {"prod", "production"}
+
+
 def get_database_url() -> str:
-    db = get_database()
-    env_url = os.environ.get("FORGEFLEET_DATABASE_URL")
+    env_url = os.environ.get("FORGEFLEET_DATABASE_URL", "").strip()
     if env_url:
         return env_url
-    url = db.get("url")
-    if url:
-        return url
+
+    if _is_production_env():
+        raise RuntimeError("FORGEFLEET_DATABASE_URL must be set in production")
+
+    db = get_database()
+    config_url = str(db.get("url", "")).strip()
+    if config_url:
+        return config_url
+
     host = db.get("host", "127.0.0.1")
     port = db.get("port", 5432)
     name = db.get("name", "forgefleet")
-    user = db.get("user", "forgefleet")
-    password = db.get("password", "forgefleet")
-    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+    user = str(db.get("user", "")).strip()
+    password = str(db.get("password", "")).strip()
+
+    auth = ""
+    if user and password:
+        auth = f"{user}:{password}@"
+    elif user:
+        auth = f"{user}@"
+
+    return f"postgresql://{auth}{host}:{port}/{name}"
 
 def get_node_models(name: str) -> dict:
     return get_node(name).get("models", {})

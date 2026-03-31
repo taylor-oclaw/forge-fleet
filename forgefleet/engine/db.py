@@ -13,8 +13,8 @@ def parse_database_url(url: str | None = None) -> dict:
         "scheme": parsed.scheme,
         "host": parsed.hostname or "127.0.0.1",
         "port": parsed.port or 5432,
-        "user": parsed.username or "forgefleet",
-        "password": parsed.password or "forgefleet",
+        "user": parsed.username,
+        "password": parsed.password,
         "database": (parsed.path or "/forgefleet").lstrip("/"),
     }
 
@@ -26,11 +26,15 @@ def connect():
         raise RuntimeError("psycopg is required for ForgeFleet Postgres support") from e
 
     db = parse_database_url()
-    return psycopg.connect(
-        host=db["host"],
-        port=db["port"],
-        user=db["user"],
-        password=db["password"],
-        dbname=db["database"],
-        autocommit=True,
-    )
+    conn_kwargs = {
+        "host": db["host"],
+        "port": db["port"],
+        "dbname": db["database"],
+        "autocommit": True,
+    }
+    if db.get("user"):
+        conn_kwargs["user"] = db["user"]
+    if db.get("password"):
+        conn_kwargs["password"] = db["password"]
+
+    return psycopg.connect(**conn_kwargs)

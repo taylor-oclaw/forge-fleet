@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: forgefleet
       POSTGRES_USER: forgefleet
-      POSTGRES_PASSWORD: forgefleet
+      POSTGRES_PASSWORD: ${FORGEFLEET_POSTGRES_PASSWORD:?set FORGEFLEET_POSTGRES_PASSWORD}
     ports:
       - "55432:5432"
     volumes:

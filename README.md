@@ -15,13 +15,13 @@ ForgeFleet turns any number of machines with local LLMs into a production-grade 
 ├──────────┼──────────┼──────────┼──────────┼─────────┤
 │CocoIndex │ 10x/     │ Strands  │ agent.py │ SQLite  │
 │ Aider    │ graniet  │ mini-SWE │ git+GH   │ Strands │
-│ repo-map │ fleet.json│ Crush   │ MC API   │ Mem0    │
+│ repo-map │ fleet.toml│ Crush   │ MC API   │ Mem0    │
 ├──────────┴──────────┴──────────┴──────────┴─────────┤
 │            Local LLMs (llama.cpp)                     │
 │  Qwen3.5-9B │ Qwen2.5-Coder-32B │ Qwen2.5-72B │ 235B │
 ├──────────────┴───────────────────┴─────────────┴──────┤
-│              N Physical Machines (auto-discovered from fleet.json)                       │
-│  Auto-discovered from fleet.json — add/remove nodes anytime     │
+│              N Physical Machines (auto-discovered from fleet.toml)                       │
+│  Auto-discovered from fleet.toml — add/remove nodes anytime     │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -64,7 +64,7 @@ Fleet-aware load balancing routes to idle models across the network.
 
 ```bash
 pip install forgefleet
-forgefleet init  # reads fleet.json, discovers models
+forgefleet init  # reads fleet.toml, discovers models
 forgefleet run "Build billing subscription CRUD"  # dispatches to fleet
 ```
 

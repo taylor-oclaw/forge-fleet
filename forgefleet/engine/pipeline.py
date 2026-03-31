@@ -8,7 +8,12 @@
 6. Completion — commit, push, unblock dependents
 """
 import json
+import logging
 import os
+import shlex
+import shutil
+import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -25,7 +30,11 @@ from .context_store import ContextStore
 from .ownership import OwnershipManager
 from .lifecycle_policy import LifecyclePolicy, MergeContext
 from .mcp_topology import MCPTopology
+from .openclaw_bridge import OpenClawBridge
 from .. import config
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -59,32 +68,143 @@ class EngineeringPipeline:
     
     def __init__(self, repo_dir: str, mc_url: str = "",
                  ownership: OwnershipManager | None = None):
-        self.repo_dir = repo_dir
+        self.base_repo_dir = os.path.abspath(repo_dir)
         self.router = FleetRouter()
         self.mc = MCClient(base_url=mc_url or config.get_mc_url())
-        self.git = GitOps(repo_dir)
         self.evolution = EvolutionEngine()
         self.context_store = ContextStore()
-        self.repo_map = RepoMap(repo_dir)
-        self.tools = self._build_tools()
         self.ownership = ownership
         self.lifecycle = LifecyclePolicy()
         self.topology = MCPTopology.from_config()
-    
+        self._set_repo_dir(self.base_repo_dir)
+
+    def _set_repo_dir(self, repo_dir: str):
+        """Switch active repo context (base checkout or per-ticket worktree)."""
+        self.repo_dir = os.path.abspath(repo_dir)
+        self.git = GitOps(self.repo_dir)
+        self.repo_map = RepoMap(self.repo_dir)
+        self.tools = self._build_tools()
+
+    def _safe_ticket_token(self, ticket_id: str) -> str:
+        token = "".join(ch for ch in str(ticket_id) if ch.isalnum())
+        return (token or "ticket")[:12]
+
+    def _run_base_git(self, *args, timeout: int = 60):
+        return GitOps(self.base_repo_dir)._run(*args, timeout=timeout)
+
+    def _create_ticket_worktree(self, ticket_id: str) -> tuple[str, str, str]:
+        """Create an isolated git worktree for a ticket execution."""
+        token = self._safe_ticket_token(ticket_id)
+        branch = f"feat/forgefleet-{token}"
+        worktree_root = tempfile.mkdtemp(prefix=f"forgefleet-{token}-")
+        worktree_dir = os.path.join(worktree_root, "repo")
+
+        self._run_base_git("fetch", "origin", "main", timeout=90)
+        add_result = self._run_base_git(
+            "worktree", "add", "-B", branch, worktree_dir, "origin/main", timeout=90
+        )
+        if not add_result.success:
+            add_result = self._run_base_git(
+                "worktree", "add", "-B", branch, worktree_dir, "main", timeout=90
+            )
+
+        if not add_result.success:
+            shutil.rmtree(worktree_root, ignore_errors=True)
+            raise RuntimeError(f"Failed to create worktree: {add_result.error or add_result.output}")
+
+        return branch, worktree_root, worktree_dir
+
+    def _cleanup_ticket_worktree(self, worktree_root: str, worktree_dir: str):
+        """Clean up per-ticket worktree after execution."""
+        if worktree_dir:
+            remove_result = self._run_base_git("worktree", "remove", "--force", worktree_dir, timeout=90)
+            if not remove_result.success and "not a working tree" not in (remove_result.error or ""):
+                logger.warning(
+                    "Failed to remove worktree %s: %s",
+                    worktree_dir,
+                    remove_result.error or remove_result.output,
+                )
+
+        self._run_base_git("worktree", "prune", timeout=30)
+        if worktree_root:
+            shutil.rmtree(worktree_root, ignore_errors=True)
+
+    def _renew_lease(self, ticket_id: str, stage: str):
+        if not self.ownership:
+            return
+        ok, reason = self.ownership.renew_lease(ticket_id)
+        if not ok and reason != "no_task":
+            logger.warning("Lease renewal failed for %s at %s: %s", ticket_id, stage, reason)
+
+    def _handle_human_escalation(self, ticket_id: str, title: str,
+                                 description: str, escalation_reason: str,
+                                 branch: str = ""):
+        """Trigger real human escalation workflow (Telegram + MC review item)."""
+        review_message = (
+            "🚨 ForgeFleet escalation reached HUMAN review\n\n"
+            f"Ticket: {title}\n"
+            f"Ticket ID: {ticket_id}\n"
+            f"Reason: {escalation_reason}\n"
+            f"Branch: {branch or 'n/a'}"
+        )
+
+        try:
+            OpenClawBridge().send_message(review_message)
+        except Exception as exc:
+            logger.warning("Failed to send human escalation Telegram notification: %s", exc)
+
+        review_description = (
+            f"Human escalation required for ticket {ticket_id}.\n\n"
+            f"Reason: {escalation_reason}\n"
+            f"Branch: {branch or 'n/a'}\n\n"
+            f"Original description:\n{description[:1500]}"
+        )
+
+        existing_review = None
+        for ticket in self.mc.get_tickets(limit=200):
+            if ticket.get("parent_id") == ticket_id and "[review]" in ticket.get("title", "").lower():
+                existing_review = ticket
+                break
+
+        if existing_review:
+            self.mc.update_ticket(
+                existing_review["id"],
+                "ready_for_review",
+                result=review_description,
+                branch=branch,
+            )
+        else:
+            self.mc.create_review_ticket(
+                original_ticket_id=ticket_id,
+                branch=branch,
+                title=title,
+                description=review_description,
+            )
+
+        self.mc.update_ticket(ticket_id, "ready_for_review", result=review_description, branch=branch)
+
     def execute(self, ticket: dict) -> PipelineResult:
         """Execute the full pipeline for a ticket."""
         tid = ticket["id"]
         title = ticket.get("title", "")
         desc = ticket.get("description", title)
         task_type = self._detect_task_type(desc)
-        
+
         result = PipelineResult(ticket_id=tid, title=title)
         start = time.time()
-        
+        branch = ""
+        worktree_root = ""
+        worktree_dir = ""
+
         print(f"\n{'='*60}", flush=True)
         print(f"🎯 Pipeline: {title[:60]}", flush=True)
-        
+
         try:
+            branch, worktree_root, worktree_dir = self._create_ticket_worktree(tid)
+            self._set_repo_dir(worktree_dir)
+            result.branch = branch
+            self._renew_lease(tid, "worktree_ready")
+
             topology_validation = self._validate_runtime_topology()
             result.topology = topology_validation
             result.phase_results["topology"] = topology_validation
@@ -97,18 +217,21 @@ class EngineeringPipeline:
                 print(f"  ⚠️ {topology_validation.get('summary', 'MCP topology degraded')}", flush=True)
 
             # Step 1: CONTEXT GATHERING
+            self._renew_lease(tid, "context")
             print(f"\n📚 Step 1: Context Gathering", flush=True)
             context = self._gather_context(ticket)
             result.phase_results["context"] = context
             self._record_stage_model(tid, "context_gathering")
-            
+
             # Step 2: PLANNING
+            self._renew_lease(tid, "planning")
             print(f"\n📋 Step 2: Planning", flush=True)
             plan = self._create_plan(ticket, context)
             result.phase_results["plan"] = plan
             self._record_stage_model(tid, "planning")
-            
+
             # Step 3: PRE-BUILD MULTI-PERSPECTIVE REVIEW
+            self._renew_lease(tid, "pre_review")
             print(f"\n🔍 Step 3: Pre-Build Review ({len(PRE_BUILD_ROLES)} perspectives)", flush=True)
             pre_issues = self._multi_perspective_review(plan, PRE_BUILD_ROLES, "pre")
             result.pre_review_issues = pre_issues
@@ -119,7 +242,7 @@ class EngineeringPipeline:
             if self.ownership:
                 for role in PRE_BUILD_ROLES:
                     self.ownership.add_contributor(tid, role.name if hasattr(role, 'name') else str(role))
-            
+
             # Check for prerequisites
             prereqs = [
                 i for i in pre_issues
@@ -128,14 +251,12 @@ class EngineeringPipeline:
             if prereqs:
                 result.prerequisite_tickets = self._create_prerequisite_tickets(tid, prereqs)
                 print(f"  ⚠️ Created {len(result.prerequisite_tickets)} prerequisite tickets", flush=True)
-            
+
             # Step 4: BUILD
+            self._renew_lease(tid, "build")
             print(f"\n🔨 Step 4: Build", flush=True)
-            branch = f"feat/forgefleet-{tid[:8]}"
-            self.git.create_branch(branch)
             build_result = self._build_with_retry(tid, desc, context, plan, result)
             result.phase_results["build"] = build_result
-            result.branch = branch
             self._record_stage_model(tid, "build")
 
             tests_passed = self._tests_passed(build_result)
@@ -144,9 +265,10 @@ class EngineeringPipeline:
                 self.mc.fail_ticket(tid, "Build/test stage did not produce a passing result")
                 print(f"  ❌ Build/test stage did not pass lifecycle policy", flush=True)
                 return self._finalize_result(result, task_type=task_type, start_time=start)
-            
+
             # Step 5: POST-BUILD MULTI-PERSPECTIVE REVIEW
             if self.git.has_changes():
+                self._renew_lease(tid, "post_review")
                 print(f"\n🔬 Step 5: Post-Build Review ({len(POST_BUILD_ROLES)} perspectives)", flush=True)
                 post_issues = self._run_post_build_review(tid, desc, context, plan, result)
                 result.post_review_issues = post_issues
@@ -168,8 +290,9 @@ class EngineeringPipeline:
                         flush=True,
                     )
                     return self._finalize_result(result, task_type=task_type, start_time=start)
-                
+
                 # Step 6: COMPLETION
+                self._renew_lease(tid, "completion")
                 print(f"\n✅ Step 6: Completion", flush=True)
                 completion = self._complete_execution(
                     tid=tid,
@@ -193,7 +316,7 @@ class EngineeringPipeline:
                 result.final_state = self.lifecycle.failure_state(execution_failed=True)
                 self.mc.fail_ticket(tid, "No code changes produced")
                 print(f"  ⚠️ No changes produced", flush=True)
-            
+
         except Exception as e:
             result.phase_results["error"] = str(e)
             if not result.final_state:
@@ -207,9 +330,18 @@ class EngineeringPipeline:
                     ok, reason = self.ownership.escalate(tid)
                     if ok:
                         print(f"  ⬆️ Escalated to {reason}", flush=True)
+                        if reason.endswith("human"):
+                            self._handle_human_escalation(
+                                ticket_id=tid,
+                                title=title,
+                                description=desc,
+                                escalation_reason=reason,
+                                branch=branch,
+                            )
         finally:
-            self.git._run("checkout", "main")
-        
+            self._set_repo_dir(self.base_repo_dir)
+            self._cleanup_ticket_worktree(worktree_root, worktree_dir)
+
         return self._finalize_result(result, task_type=task_type, start_time=start)
 
     def _finalize_result(self, result: PipelineResult, task_type: str,
@@ -244,6 +376,7 @@ class EngineeringPipeline:
         last_result = {"success": False, "error": "build_not_started"}
 
         while True:
+            self._renew_lease(ticket_id, f"build_attempt_{attempt}")
             try:
                 last_result = self._build(description, context, plan)
             except Exception as e:
@@ -273,6 +406,7 @@ class EngineeringPipeline:
                                plan: str, result: PipelineResult) -> list[str]:
         """Run post-build review and bounded repair loops."""
         review_loops = 0
+        self._renew_lease(ticket_id, "post_review_initial")
         issues = self._review_current_changes(description)
         result.phase_results["post_review_attempt_0"] = issues
         self._record_stage_model(ticket_id, "post_review")
@@ -286,6 +420,7 @@ class EngineeringPipeline:
                 flush=True,
             )
             feedback = "\n".join(issues)
+            self._renew_lease(ticket_id, f"post_review_loop_{review_loops}")
             retry_description = (
                 f"{description}\n\nAddress these blocking review findings before completion:\n"
                 f"{feedback[:3000]}"
@@ -318,6 +453,7 @@ class EngineeringPipeline:
                             review_passed: bool, result: PipelineResult,
                             start_time: float) -> dict:
         """Apply lifecycle merge policy and complete the ticket."""
+        self._renew_lease(tid, "completion_stage")
         stage_result = self.git.stage_all()
         if not stage_result.success:
             return {
@@ -326,6 +462,7 @@ class EngineeringPipeline:
                 "error": stage_result.error or stage_result.output,
             }
 
+        self._renew_lease(tid, "completion_commit")
         commit_result = self.git.commit(f"feat: {title[:50]} [ForgeFleet Pipeline]")
         if not commit_result.success:
             return {
@@ -334,6 +471,7 @@ class EngineeringPipeline:
                 "error": commit_result.error or commit_result.output,
             }
 
+        self._renew_lease(tid, "completion_push_branch")
         branch_push = self.git.push(branch)
         if not branch_push.success:
             return {
@@ -358,6 +496,7 @@ class EngineeringPipeline:
         mc_updated = False
 
         if auto_merge_allowed:
+            self._renew_lease(tid, "completion_merge")
             merged = self._merge_branch_to_main(branch, title)
             if merged:
                 response = self.mc.complete_ticket(tid, completion_message, branch)
@@ -684,39 +823,105 @@ Be specific — file names, line references, exact problems."""},
     # ─── Tools ──────────────────────────────────────
     
     def _build_tools(self) -> list:
-        """Build file tools scoped to the repo."""
-        repo = self.repo_dir
-        import subprocess
-        
+        """Build file tools scoped to the active repo with traversal safeguards."""
+        repo = os.path.abspath(self.repo_dir)
+        allowed_commands = {
+            "git", "python", "python3", "python3.11", "python3.12", "pytest",
+            "pip", "pip3", "uv", "ruff", "mypy", "npm", "pnpm", "yarn",
+            "node", "npx", "cargo", "go", "make", "just", "ls", "cat",
+            "grep", "sed", "find", "echo", "bash", "sh",
+        }
+        blocked_shell_tokens = ("&&", "||", ";", "|", "`", "$(")
+
+        def resolve_repo_path(path_value: str, allow_missing: bool = False) -> str:
+            rel = (path_value or ".").strip() or "."
+            candidate = os.path.abspath(os.path.join(repo, rel))
+            if os.path.commonpath([repo, candidate]) != repo:
+                raise ValueError(f"Path escapes repository root: {path_value}")
+            if not allow_missing and not os.path.exists(candidate):
+                raise FileNotFoundError(path_value)
+            return candidate
+
         def rf(filepath=""):
-            f = os.path.join(repo, filepath)
-            if not os.path.exists(f): return f"Not found: {filepath}"
-            c = open(f).read(); return c[:4000] if len(c) > 4000 else c
-        
-        def lf(directory=".", pattern=""):
-            full = os.path.join(repo, directory)
-            exclude = {"target", "node_modules", ".git", "dist", ".next", "__pycache__"}
-            files = []
-            for root, dirs, fnames in os.walk(full):
-                dirs[:] = [d for d in dirs if d not in exclude]
-                for f in fnames:
-                    if pattern and not f.endswith(pattern): continue
-                    files.append(os.path.relpath(os.path.join(root, f), repo))
-                if len(files) > 30: break
-            return "\n".join(files[:30])
-        
-        def wf(filepath="", content=""):
-            f = os.path.join(repo, filepath)
-            os.makedirs(os.path.dirname(f), exist_ok=True)
-            open(f, "w").write(content)
-            return f"WRITTEN: {filepath} ({len(content)} chars)"
-        
-        def rc(command=""):
             try:
-                r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60, cwd=repo)
-                return (r.stdout + r.stderr)[:3000]
-            except Exception as e: return str(e)
-        
+                file_path = resolve_repo_path(filepath)
+                if not os.path.isfile(file_path):
+                    return f"Not found: {filepath}"
+                with open(file_path, encoding="utf-8", errors="ignore") as handle:
+                    content = handle.read()
+                return content[:4000] if len(content) > 4000 else content
+            except Exception as e:
+                return f"Error: {e}"
+
+        def lf(directory=".", pattern=""):
+            try:
+                full = resolve_repo_path(directory or ".")
+                if not os.path.isdir(full):
+                    return f"Not found: {directory}"
+                exclude = {"target", "node_modules", ".git", "dist", ".next", "__pycache__"}
+                files = []
+                for root, dirs, fnames in os.walk(full):
+                    dirs[:] = [d for d in dirs if d not in exclude]
+                    for filename in fnames:
+                        if pattern and not filename.endswith(pattern):
+                            continue
+                        files.append(os.path.relpath(os.path.join(root, filename), repo))
+                    if len(files) > 30:
+                        break
+                return "\n".join(files[:30])
+            except Exception as e:
+                return f"Error: {e}"
+
+        def wf(filepath="", content=""):
+            try:
+                file_path = resolve_repo_path(filepath, allow_missing=True)
+                parent = os.path.dirname(file_path)
+                if os.path.commonpath([repo, parent]) != repo:
+                    return f"Rejected path: {filepath}"
+                os.makedirs(parent, exist_ok=True)
+                with open(file_path, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+                relative = os.path.relpath(file_path, repo)
+                return f"WRITTEN: {relative} ({len(content)} chars)"
+            except Exception as e:
+                return f"Error: {e}"
+
+        def guard_command(command: str) -> tuple[bool, str, list[str]]:
+            if not command or not command.strip():
+                return False, "Rejected: empty command", []
+            if any(token in command for token in blocked_shell_tokens):
+                return False, "Rejected: shell operators are blocked", []
+            try:
+                args = shlex.split(command)
+            except ValueError as exc:
+                return False, f"Rejected: invalid command syntax ({exc})", []
+            if not args:
+                return False, "Rejected: empty command", []
+            if args[0] not in allowed_commands:
+                return False, f"Rejected command '{args[0]}' — not in allowlist", []
+
+            for arg in args[1:]:
+                if arg.startswith("/") or arg == ".." or arg.startswith("../"):
+                    return False, f"Rejected path argument: {arg}", []
+            return True, "", args
+
+        def rc(command=""):
+            ok, reason, args = guard_command(command)
+            if not ok:
+                return reason
+            try:
+                result = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    cwd=repo,
+                    shell=False,
+                )
+                return (result.stdout + result.stderr)[:3000]
+            except Exception as e:
+                return str(e)
+
         return [
             Tool(name="read_file", description="Read a file",
                  parameters={"type": "object", "properties": {"filepath": {"type": "string"}}, "required": ["filepath"]}, func=rf),
@@ -724,6 +929,6 @@ Be specific — file names, line references, exact problems."""},
                  parameters={"type": "object", "properties": {"directory": {"type": "string"}, "pattern": {"type": "string"}}}, func=lf),
             Tool(name="write_file", description="Create/overwrite a file",
                  parameters={"type": "object", "properties": {"filepath": {"type": "string"}, "content": {"type": "string"}}, "required": ["filepath", "content"]}, func=wf),
-            Tool(name="run_command", description="Run shell command",
+            Tool(name="run_command", description="Run guarded shell command",
                  parameters={"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, func=rc),
         ]

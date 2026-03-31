@@ -5,7 +5,7 @@
 1. **Smallest model first** — 90% of tasks complete on the fast local model
 2. **Each tier builds on previous work** — not fresh start
 3. **Fleet-aware** — try localhost first, then remote nodes
-4. **One source of truth** — fleet.json drives everything
+4. **One source of truth** — fleet.toml drives everything
 5. **Tools over text** — models use file_read/shell, not raw prompts
 6. **Learn from failures** — shared memory across agents
 
@@ -17,7 +17,7 @@
 - Output: relevant file contents + function signatures for prompt
 
 ### Layer 2: Routing Engine  
-- Reads fleet.json tiered_pipeline config
+- Reads fleet.toml tiered_pipeline config
 - Checks /slots on all fleet nodes for availability
 - Routes to smallest available model that can handle the task
 - Multi-step: different model per step

@@ -9,14 +9,30 @@ Core model:
 """
 from __future__ import annotations
 
+import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .db import connect
 from .. import config
 
 
 ESCALATION_LADDER = ["intern", "junior", "senior", "executive", "human"]
+TERMINAL_STATES = {
+    "completed",
+    "done",
+    "released",
+    "failed",
+    "blocked",
+    "cancelled",
+    "abandoned",
+    "mc_claim_failed",
+    "lease_expired",
+}
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -60,10 +76,28 @@ class OwnershipManager:
         self.tracker = tracker
         self.tasks: dict[str, TaskOwnership] = {}
 
+        if not self.tracker:
+            logger.warning(
+                "OwnershipManager running in degraded mode on node '%s': Postgres tracker unavailable",
+                self.node_name,
+            )
+
     def claim(self, ticket_id: str, owner_level: str = "junior") -> tuple[bool, str]:
         existing = self.tasks.get(ticket_id)
         if existing and not existing.is_expired() and existing.owner != self.node_name:
             return False, f"owned_by:{existing.owner}"
+
+        db_handoff_count = existing.handoff_count if existing else 0
+        db_escalation_count = existing.escalation_count if existing else 0
+        db_source_owner = existing.owner if existing else ""
+
+        if self.tracker:
+            claimed, reason, db_info = self._claim_in_postgres(ticket_id, owner_level)
+            if not claimed:
+                return False, reason
+            db_handoff_count = db_info.get("handoff_count", db_handoff_count)
+            db_escalation_count = db_info.get("escalation_count", db_escalation_count)
+            db_source_owner = db_info.get("source_owner", db_source_owner)
 
         task = TaskOwnership(
             ticket_id=ticket_id,
@@ -71,14 +105,83 @@ class OwnershipManager:
             owner_level=owner_level,
             claimed_at=time.time(),
             lease_seconds=self.lease_seconds,
-            handoff_count=existing.handoff_count if existing else 0,
-            escalation_count=existing.escalation_count if existing else 0,
-            source_owner=existing.owner if existing else "",
+            handoff_count=db_handoff_count,
+            escalation_count=db_escalation_count,
+            source_owner=db_source_owner,
             state="claimed",
         )
         self.tasks[ticket_id] = task
         self._persist(task, "claimed")
         return True, "claimed"
+
+    def _claim_in_postgres(self, ticket_id: str, owner_level: str) -> tuple[bool, str, dict]:
+        """Distributed claim check with SELECT FOR UPDATE to prevent cross-node duplicates."""
+        now = time.time()
+        info = {"handoff_count": 0, "escalation_count": 0, "source_owner": ""}
+
+        try:
+            with connect() as conn:
+                conn.autocommit = False
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT current_owner, state, updated_at, handoff_count, escalation_count
+                        FROM task_execution
+                        WHERE ticket_id = %s
+                        FOR UPDATE
+                        """,
+                        (ticket_id,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        current_owner, state, updated_at, handoff_count, escalation_count = row
+                        info["handoff_count"] = handoff_count or 0
+                        info["escalation_count"] = escalation_count or 0
+                        info["source_owner"] = current_owner or ""
+                        lease_active = bool(updated_at and updated_at + self.lease_seconds > now)
+                        if (
+                            current_owner
+                            and current_owner != self.node_name
+                            and state not in TERMINAL_STATES
+                            and lease_active
+                        ):
+                            conn.rollback()
+                            return False, f"owned_in_db:{current_owner}", info
+
+                    cur.execute(
+                        """
+                        INSERT INTO task_execution (
+                            ticket_id, current_owner, owner_level, state, status_reason,
+                            handoff_count, escalation_count, contributors_json,
+                            reviewers_json, escalation_path_json, last_model_json, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (ticket_id) DO UPDATE SET
+                            current_owner = EXCLUDED.current_owner,
+                            owner_level = EXCLUDED.owner_level,
+                            state = EXCLUDED.state,
+                            status_reason = EXCLUDED.status_reason,
+                            updated_at = EXCLUDED.updated_at
+                        """,
+                        (
+                            ticket_id,
+                            self.node_name,
+                            owner_level,
+                            "claimed",
+                            "",
+                            info["handoff_count"],
+                            info["escalation_count"],
+                            "[]",
+                            "[]",
+                            "[]",
+                            "{}",
+                            now,
+                        ),
+                    )
+                conn.commit()
+            return True, "claimed", info
+        except Exception as exc:
+            logger.warning("Postgres distributed claim check failed for %s: %s", ticket_id, exc)
+            return False, "db_claim_error", info
 
     def add_contributor(self, ticket_id: str, contributor: str) -> tuple[bool, str]:
         task = self.tasks.get(ticket_id)
@@ -168,6 +271,68 @@ class OwnershipManager:
         task.state = "renewed"
         self._persist(task, "renewed")
         return True, "renewed"
+
+    def renew_lease(self, ticket_id: str) -> tuple[bool, str]:
+        """Explicit lease-renewal API used by long-running pipeline stages."""
+        return self.renew(ticket_id)
+
+    def reap_expired_leases(self, limit: int = 200) -> list[str]:
+        """Mark stale Postgres ownership leases as expired for recovery."""
+        if not self.tracker:
+            return []
+
+        cutoff = time.time() - self.lease_seconds
+        expired_ids: list[str] = []
+
+        try:
+            with connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT ticket_id, current_owner
+                        FROM task_execution
+                        WHERE NOT (state = ANY(%s))
+                          AND updated_at < %s
+                        ORDER BY updated_at ASC
+                        LIMIT %s
+                        """,
+                        (list(TERMINAL_STATES), cutoff, limit),
+                    )
+                    rows = cur.fetchall()
+
+                    for ticket_id, current_owner in rows:
+                        expired_ids.append(ticket_id)
+                        cur.execute(
+                            """
+                            UPDATE task_execution
+                            SET state = %s,
+                                status_reason = %s,
+                                updated_at = %s
+                            WHERE ticket_id = %s
+                            """,
+                            ("lease_expired", "lease_reaper", time.time(), ticket_id),
+                        )
+                        cur.execute(
+                            """
+                            INSERT INTO execution_events (ticket_id, event_type, actor, details_json, created_at)
+                            VALUES (%s, %s, %s, %s, %s)
+                            """,
+                            (
+                                ticket_id,
+                                "lease_reaped",
+                                self.node_name,
+                                json.dumps({"previous_owner": current_owner}),
+                                time.time(),
+                            ),
+                        )
+
+            for ticket_id in expired_ids:
+                self.tasks.pop(ticket_id, None)
+
+        except Exception as exc:
+            logger.warning("Failed to reap expired leases: %s", exc)
+
+        return expired_ids
 
     def release(self, ticket_id: str,
                 final_state: str = "released") -> tuple[bool, str]:

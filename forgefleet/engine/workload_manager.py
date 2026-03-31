@@ -7,6 +7,7 @@ Decides how many tickets to work on simultaneously based on:
 - Model sizes and tiers
 """
 from dataclasses import dataclass, field
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .fleet_router import FleetRouter
 from .mc_client import MCClient
@@ -16,6 +17,9 @@ from .ownership import OwnershipManager
 from .execution_tracking import ExecutionTracker
 from .lifecycle_policy import LifecyclePolicy
 from .mcp_topology import MCPTopology
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,8 +56,12 @@ class WorkloadManager:
     def _init_tracker(self):
         try:
             self.tracker = ExecutionTracker()
-        except Exception:
+        except Exception as exc:
             self.tracker = None
+            logger.warning(
+                "Postgres execution tracker unavailable; distributed ownership degraded to in-memory mode: %s",
+                exc,
+            )
         self.ownership = OwnershipManager(
             node_name=self.mc.node_name,
             tracker=self.tracker,
@@ -128,6 +136,11 @@ class WorkloadManager:
             return "simple"
         
         return "moderate"
+
+    def _execute_ticket_pipeline(self, ticket: dict) -> PipelineResult:
+        """Create an isolated pipeline instance per ticket execution."""
+        pipeline = EngineeringPipeline(self.repo_dir, ownership=self.ownership)
+        return pipeline.execute(ticket)
     
     def run_batch(self, max_tickets: int = 20) -> list[PipelineResult]:
         """Run a batch of tickets with dynamic concurrency."""
@@ -137,6 +150,10 @@ class WorkloadManager:
             return []
         if topology_validation.degraded:
             print(f"⚠️ MCP topology degraded: {topology_validation.summary()}", flush=True)
+
+        expired = self.ownership.reap_expired_leases()
+        if expired:
+            logger.warning("Reaped %d expired ownership leases", len(expired))
 
         tickets = self.mc.get_claimable()
         if not tickets:
@@ -150,8 +167,7 @@ class WorkloadManager:
         print(f"   Running {decision.max_concurrent} tickets concurrently", flush=True)
         
         results = []
-        pipeline = EngineeringPipeline(self.repo_dir, ownership=self.ownership)
-        
+
         with ThreadPoolExecutor(max_workers=decision.max_concurrent) as executor:
             futures = {}
             
@@ -174,7 +190,7 @@ class WorkloadManager:
                     print(f"  ⏭️ Skipping {ticket['title'][:50]} ({exec_reason})", flush=True)
                     continue
 
-                future = executor.submit(pipeline.execute, ticket)
+                future = executor.submit(self._execute_ticket_pipeline, ticket)
                 futures[future] = ticket
                 self.active_tasks[ticket_id] = future
             
