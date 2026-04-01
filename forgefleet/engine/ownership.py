@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .db import connect
+from .errors import ClaimConflictError, ConfigError, LeaseExpiredError
+from .transcript import get_transcript_store
 from .. import config
 
 
@@ -69,11 +71,12 @@ class OwnershipManager:
     """
 
     def __init__(self, node_name: str = "", max_handoffs: int = 3,
-                 lease_seconds: int = 1800, tracker=None):
+                 lease_seconds: int = 1800, tracker=None, transcript_store=None):
         self.node_name = node_name or config.get_node_name()
         self.max_handoffs = max_handoffs
         self.lease_seconds = lease_seconds
         self.tracker = tracker
+        self.transcript = transcript_store or get_transcript_store()
         self.tasks: dict[str, TaskOwnership] = {}
 
         if not self.tracker:
@@ -85,7 +88,12 @@ class OwnershipManager:
     def claim(self, ticket_id: str, owner_level: str = "junior") -> tuple[bool, str]:
         existing = self.tasks.get(ticket_id)
         if existing and not existing.is_expired() and existing.owner != self.node_name:
-            return False, f"owned_by:{existing.owner}"
+            error = ClaimConflictError(
+                f"Ticket already owned by {existing.owner}",
+                context={"ticket_id": ticket_id, "current_owner": existing.owner},
+                recoverable=True,
+            )
+            return False, f"owned_by:{existing.owner}" or error.error_code
 
         db_handoff_count = existing.handoff_count if existing else 0
         db_escalation_count = existing.escalation_count if existing else 0
@@ -113,6 +121,24 @@ class OwnershipManager:
         self.tasks[ticket_id] = task
         self._persist(task, "claimed")
         return True, "claimed"
+
+    def claim_or_raise(self, ticket_id: str, owner_level: str = "junior") -> TaskOwnership:
+        claimed, reason = self.claim(ticket_id, owner_level=owner_level)
+        if not claimed:
+            raise ClaimConflictError(
+                f"Unable to claim ticket {ticket_id}: {reason}",
+                context={"ticket_id": ticket_id, "reason": reason},
+                recoverable=True,
+            )
+        task = self.tasks.get(ticket_id)
+        if not task:
+            raise ClaimConflictError(
+                f"Claim succeeded but task cache missing for {ticket_id}",
+                error_code="claim_cache_miss",
+                context={"ticket_id": ticket_id},
+                recoverable=True,
+            )
+        return task
 
     def _claim_in_postgres(self, ticket_id: str, owner_level: str) -> tuple[bool, str, dict]:
         """Distributed claim check with SELECT FOR UPDATE to prevent cross-node duplicates."""
@@ -146,7 +172,12 @@ class OwnershipManager:
                             and lease_active
                         ):
                             conn.rollback()
-                            return False, f"owned_in_db:{current_owner}", info
+                            conflict = ClaimConflictError(
+                                f"Ticket {ticket_id} already owned by {current_owner}",
+                                context={"ticket_id": ticket_id, "current_owner": current_owner, "state": state},
+                                recoverable=True,
+                            )
+                            return False, f"owned_in_db:{current_owner}" or conflict.error_code, info
 
                     cur.execute(
                         """
@@ -180,8 +211,14 @@ class OwnershipManager:
                 conn.commit()
             return True, "claimed", info
         except Exception as exc:
-            logger.warning("Postgres distributed claim check failed for %s: %s", ticket_id, exc)
-            return False, "db_claim_error", info
+            error = ConfigError(
+                "Postgres distributed claim check failed",
+                error_code="db_claim_error",
+                context={"ticket_id": ticket_id, "error": str(exc)},
+                recoverable=True,
+            )
+            logger.warning("%s", error)
+            return False, error.error_code, info
 
     def add_contributor(self, ticket_id: str, contributor: str) -> tuple[bool, str]:
         task = self.tasks.get(ticket_id)
@@ -330,7 +367,13 @@ class OwnershipManager:
                 self.tasks.pop(ticket_id, None)
 
         except Exception as exc:
-            logger.warning("Failed to reap expired leases: %s", exc)
+            error = ConfigError(
+                "Failed to reap expired leases",
+                error_code="lease_reap_failed",
+                context={"error": str(exc), "limit": limit},
+                recoverable=True,
+            )
+            logger.warning("%s", error)
 
         return expired_ids
 
@@ -354,29 +397,88 @@ class OwnershipManager:
             return False, "lease_expired"
         return True, "ok"
 
+    def require_can_execute(self, ticket_id: str) -> TaskOwnership:
+        task = self.tasks.get(ticket_id)
+        if not task:
+            raise ClaimConflictError(
+                f"Ticket {ticket_id} is not currently claimed",
+                error_code="no_task",
+                context={"ticket_id": ticket_id},
+                recoverable=True,
+            )
+        if task.owner != self.node_name:
+            raise ClaimConflictError(
+                f"Ticket {ticket_id} is owned by {task.owner}",
+                context={"ticket_id": ticket_id, "current_owner": task.owner},
+                recoverable=True,
+            )
+        if task.is_expired():
+            raise LeaseExpiredError(
+                f"Ownership lease expired for {ticket_id}",
+                context={"ticket_id": ticket_id, "owner": task.owner},
+                recoverable=True,
+            )
+        return task
+
     def get_task(self, ticket_id: str) -> Optional[TaskOwnership]:
         return self.tasks.get(ticket_id)
 
+    def _log_timeline(self, ticket_id: str, event_type: str,
+                      description: str, details: dict | None = None):
+        if not ticket_id:
+            return
+        try:
+            self.transcript.log_event(ticket_id, event_type, description, metadata=details or {})
+        except Exception as exc:
+            logger.warning("Failed to log ownership timeline event for %s: %s", ticket_id, exc)
+
     def _persist(self, task: TaskOwnership, event_type: str,
                  details: dict | None = None):
+        descriptions = {
+            "claimed": f"{task.owner} claimed ticket {task.ticket_id}",
+            "claimed_existing": f"{task.owner} reclaimed ticket {task.ticket_id}",
+            "handed_off": f"Ticket {task.ticket_id} handed off to {task.owner}",
+            "escalated": f"Ticket {task.ticket_id} escalated to {task.owner_level}",
+            "renewed": f"Lease renewed for ticket {task.ticket_id}",
+            "released": f"Ticket {task.ticket_id} released",
+            "completed": f"Ticket {task.ticket_id} completed",
+            "failed": f"Ticket {task.ticket_id} failed",
+        }
+        self._log_timeline(
+            task.ticket_id,
+            event_type,
+            descriptions.get(event_type, f"Ownership event: {event_type}"),
+            {
+                "owner": task.owner,
+                "owner_level": task.owner_level,
+                "state": task.state,
+                "handoff_count": task.handoff_count,
+                "escalation_count": task.escalation_count,
+                **(details or {}),
+            },
+        )
+
         if not self.tracker:
             return
-        self.tracker.upsert_execution(
-            ticket_id=task.ticket_id,
-            current_owner=task.owner,
-            owner_level=task.owner_level,
-            state=task.state,
-            status_reason=task.status_reason,
-            handoff_count=task.handoff_count,
-            escalation_count=task.escalation_count,
-            contributors=task.contributors,
-            reviewers=task.reviewers,
-            escalation_path=task.escalation_path,
-            last_model=task.last_model,
-        )
-        self.tracker.log_event(
-            ticket_id=task.ticket_id,
-            event_type=event_type,
-            actor=task.owner,
-            details=details,
-        )
+        try:
+            self.tracker.upsert_execution(
+                ticket_id=task.ticket_id,
+                current_owner=task.owner,
+                owner_level=task.owner_level,
+                state=task.state,
+                status_reason=task.status_reason,
+                handoff_count=task.handoff_count,
+                escalation_count=task.escalation_count,
+                contributors=task.contributors,
+                reviewers=task.reviewers,
+                escalation_path=task.escalation_path,
+                last_model=task.last_model,
+            )
+            self.tracker.log_event(
+                ticket_id=task.ticket_id,
+                event_type=event_type,
+                actor=task.owner,
+                details=details,
+            )
+        except ConfigError as exc:
+            logger.warning("Ownership persistence degraded for %s: %s", task.ticket_id, exc)

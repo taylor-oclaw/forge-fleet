@@ -10,16 +10,14 @@
 import json
 import logging
 import os
-import shlex
 import shutil
-import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
+from .errors import ForgeFleetError, LLMError, ToolExecutionError
 from .llm import LLM
-from .tool import Tool
 from .fleet_router import FleetRouter
 from .mc_client import MCClient
 from .git_ops import GitOps
@@ -28,10 +26,53 @@ from .repo_map import RepoMap
 from .evolution import EvolutionEngine, TaskRecord
 from .context_store import ContextStore
 from .ownership import OwnershipManager
+from .permissions import ExecutionContext, PermissionGuard, PermissionLevel
 from .lifecycle_policy import LifecyclePolicy, MergeContext
 from .mcp_topology import MCPTopology
 from .openclaw_bridge import OpenClawBridge
+from .state_machine import ExecutionState, ExecutionStateMachine
+from .tool_executor import ToolExecutor
+from .tool_registry import ToolRegistry
 from .. import config
+
+try:
+    from .mcp_client import MCPClientManager
+except ImportError:  # pragma: no cover - fallback for older deployments
+    class MCPClientManager:  # type: ignore[no-redef]
+        def connect_all(self):
+            return None
+
+        def as_tools(self):
+            return []
+
+try:
+    from .transcript import bind_runtime_context, get_transcript_store, get_runtime_context
+except ImportError:  # pragma: no cover - fallback for older deployments
+    class _NullRuntimeScope:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _NullTranscriptStore:
+        def create_session(self, ticket_id: str = "") -> str:
+            return ""
+
+        def log_event(self, *args, **kwargs):
+            return None
+
+        def record_tool_result(self, *args, **kwargs):
+            return None
+
+    def bind_runtime_context(**kwargs):  # type: ignore[no-redef]
+        return _NullRuntimeScope()
+
+    def get_transcript_store():  # type: ignore[no-redef]
+        return _NullTranscriptStore()
+
+    def get_runtime_context():  # type: ignore[no-redef]
+        return {}
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +83,7 @@ class PipelineResult:
     """Result of the full pipeline for one ticket."""
     ticket_id: str
     title: str
+    session_id: str = ""
     success: bool = False
     phase_results: dict = field(default_factory=dict)
     files_changed: list = field(default_factory=list)
@@ -76,6 +118,12 @@ class EngineeringPipeline:
         self.ownership = ownership
         self.lifecycle = LifecyclePolicy()
         self.topology = MCPTopology.from_config()
+        self.transcript = get_transcript_store()
+        self.mcp_client = MCPClientManager()
+        self.tracker = ownership.tracker if ownership else None
+        self.state_machine: ExecutionStateMachine | None = None
+        self._active_ticket_id = ""
+        self._active_session_id = ""
         self._set_repo_dir(self.base_repo_dir)
 
     def _set_repo_dir(self, repo_dir: str):
@@ -83,7 +131,25 @@ class EngineeringPipeline:
         self.repo_dir = os.path.abspath(repo_dir)
         self.git = GitOps(self.repo_dir)
         self.repo_map = RepoMap(self.repo_dir)
+        self.tool_registry = ToolRegistry().register_builtin_tools(self.repo_dir, git_ops=self.git)
+        self.permission_guard = PermissionGuard(self.repo_dir, default_mode="elevated")
+        self.tool_executor = ToolExecutor(
+            registry=self.tool_registry,
+            permission_guard=self.permission_guard,
+            tracker=self.tracker,
+            default_context=self._tool_execution_context(),
+            max_concurrent=4,
+        )
         self.tools = self._build_tools()
+
+    def _tool_execution_context(self) -> ExecutionContext:
+        return ExecutionContext(
+            repo_dir=self.repo_dir,
+            ticket_id=self._active_ticket_id,
+            session_id=self._active_session_id,
+            actor=config.get_node_name(),
+            permission_mode="elevated",
+        )
 
     def _safe_ticket_token(self, ticket_id: str) -> str:
         token = "".join(ch for ch in str(ticket_id) if ch.isalnum())
@@ -136,10 +202,39 @@ class EngineeringPipeline:
         if not ok and reason != "no_task":
             logger.warning("Lease renewal failed for %s at %s: %s", ticket_id, stage, reason)
 
+    def _timeline(self, ticket_id: str, event_type: str,
+                  description: str, metadata: dict | None = None):
+        try:
+            self.transcript.log_event(ticket_id, event_type, description, metadata=metadata or {})
+        except Exception as exc:
+            logger.warning("Failed to log runtime timeline event %s for %s: %s", event_type, ticket_id, exc)
+
+    def _record_tool_use(self, tool_name: str, tool_args: dict | None,
+                         tool_result: str, latency_ms: int = 0):
+        ctx = get_runtime_context()
+        session_id = str(ctx.get("session_id") or self._active_session_id or "")
+        ticket_id = str(ctx.get("ticket_id") or self._active_ticket_id or "")
+        if not session_id and not ticket_id:
+            return
+        self.transcript.record_tool_result(
+            session_id=session_id,
+            ticket_id=ticket_id,
+            tool_name=tool_name,
+            tool_args=tool_args or {},
+            tool_result=tool_result,
+            latency_ms=latency_ms,
+        )
+
     def _handle_human_escalation(self, ticket_id: str, title: str,
                                  description: str, escalation_reason: str,
                                  branch: str = ""):
         """Trigger real human escalation workflow (Telegram + MC review item)."""
+        self._timeline(
+            ticket_id,
+            "escalated",
+            f"Human escalation triggered for ticket {ticket_id}",
+            {"reason": escalation_reason, "branch": branch},
+        )
         review_message = (
             "🚨 ForgeFleet escalation reached HUMAN review\n\n"
             f"Ticket: {title}\n"
@@ -190,52 +285,98 @@ class EngineeringPipeline:
         desc = ticket.get("description", title)
         task_type = self._detect_task_type(desc)
 
-        result = PipelineResult(ticket_id=tid, title=title)
+        session_id = self.transcript.create_session(ticket_id=tid)
+        result = PipelineResult(ticket_id=tid, title=title, session_id=session_id)
         start = time.time()
         branch = ""
         worktree_root = ""
         worktree_dir = ""
+        self._active_ticket_id = tid
+        self._active_session_id = session_id
+        self.state_machine = ExecutionStateMachine(
+            ticket_id=tid,
+            tracker=self.tracker,
+            ownership=self.ownership,
+            lifecycle=self.lifecycle,
+            actor=config.get_node_name(),
+            claim_on_enter=False,
+            release_on_idle=False,
+        )
 
         print(f"\n{'='*60}", flush=True)
         print(f"🎯 Pipeline: {title[:60]}", flush=True)
+        self._timeline(
+            tid,
+            "claimed",
+            f"Pipeline execution started for ticket {tid}",
+            {"session_id": session_id, "task_type": task_type},
+        )
+        runtime_scope = bind_runtime_context(
+            session_id=session_id,
+            ticket_id=tid,
+            node_name=config.get_node_name(),
+        )
+        runtime_scope.__enter__()
 
         try:
+            self.state_machine.transition(
+                ExecutionState.CLAIMING,
+                {"session_id": session_id, "claim": False, "owner_level": "junior"},
+            )
             branch, worktree_root, worktree_dir = self._create_ticket_worktree(tid)
             self._set_repo_dir(worktree_dir)
             result.branch = branch
             self._renew_lease(tid, "worktree_ready")
+            self._timeline(tid, "worktree_ready", f"Created isolated worktree for ticket {tid}", {"branch": branch, "repo_dir": worktree_dir})
 
             topology_validation = self._validate_runtime_topology()
             result.topology = topology_validation
             result.phase_results["topology"] = topology_validation
             if not topology_validation.get("can_proceed", True):
                 result.final_state = self.lifecycle.failure_state(blocked=True)
-                result.phase_results["error"] = topology_validation.get("summary", "MCP topology blocked execution")
+                failure = ToolExecutionError(
+                    topology_validation.get("summary", "MCP topology blocked execution"),
+                    error_code="runtime_topology_blocked",
+                    context={"ticket_id": tid, "topology": topology_validation},
+                    recoverable=False,
+                )
+                result.phase_results["error"] = failure.to_dict()
+                escalation_reason = self.state_machine.fail(failure, {"execution_retries": 0, "review_loops": 0})
+                if escalation_reason.endswith("human"):
+                    self._handle_human_escalation(tid, title, desc, escalation_reason, branch=branch)
+                self._timeline(tid, "blocked", failure.message, topology_validation)
                 print(f"  ⛔ {topology_validation.get('summary', 'MCP topology blocked execution')}", flush=True)
                 return self._finalize_result(result, task_type=task_type, start_time=start)
             if topology_validation.get("degraded"):
+                self._timeline(tid, "topology_degraded", topology_validation.get("summary", "MCP topology degraded"), topology_validation)
                 print(f"  ⚠️ {topology_validation.get('summary', 'MCP topology degraded')}", flush=True)
 
             # Step 1: CONTEXT GATHERING
+            self.state_machine.transition(ExecutionState.CONTEXT_GATHERING, {"branch": branch})
             self._renew_lease(tid, "context")
             print(f"\n📚 Step 1: Context Gathering", flush=True)
             context = self._gather_context(ticket)
             result.phase_results["context"] = context
+            self._timeline(tid, "context_gathered", f"Context gathered for ticket {tid}", {"relevant_files": str(context.get('relevant_files', ''))[:500]})
             self._record_stage_model(tid, "context_gathering")
 
             # Step 2: PLANNING
+            self.state_machine.transition(ExecutionState.PLANNING, {"branch": branch})
             self._renew_lease(tid, "planning")
             print(f"\n📋 Step 2: Planning", flush=True)
             plan = self._create_plan(ticket, context)
             result.phase_results["plan"] = plan
+            self._timeline(tid, "plan_created", f"Build plan created for ticket {tid}", {"plan_preview": plan[:1000]})
             self._record_stage_model(tid, "planning")
 
             # Step 3: PRE-BUILD MULTI-PERSPECTIVE REVIEW
+            self.state_machine.transition(ExecutionState.PRE_REVIEW, {"branch": branch})
             self._renew_lease(tid, "pre_review")
             print(f"\n🔍 Step 3: Pre-Build Review ({len(PRE_BUILD_ROLES)} perspectives)", flush=True)
             pre_issues = self._multi_perspective_review(plan, PRE_BUILD_ROLES, "pre")
             result.pre_review_issues = pre_issues
             result.phase_results["pre_review"] = pre_issues
+            self._timeline(tid, "pre_review_completed", f"Pre-build review completed for ticket {tid}", {"issue_count": len(pre_issues)})
             self._record_stage_model(tid, "pre_review")
 
             # Add pre-build reviewers as contributors
@@ -250,25 +391,45 @@ class EngineeringPipeline:
             ]
             if prereqs:
                 result.prerequisite_tickets = self._create_prerequisite_tickets(tid, prereqs)
+                self._timeline(tid, "prerequisites_created", f"Created {len(result.prerequisite_tickets)} prerequisite ticket(s)", {"issues": prereqs[:3]})
                 print(f"  ⚠️ Created {len(result.prerequisite_tickets)} prerequisite tickets", flush=True)
 
             # Step 4: BUILD
+            self.state_machine.transition(ExecutionState.BUILDING, {"branch": branch})
             self._renew_lease(tid, "build")
+            self._timeline(tid, "build_started", f"Build stage started for ticket {tid}", {"branch": branch})
             print(f"\n🔨 Step 4: Build", flush=True)
             build_result = self._build_with_retry(tid, desc, context, plan, result)
             result.phase_results["build"] = build_result
+            self._timeline(tid, "build_finished", f"Build stage finished for ticket {tid}", {"result": build_result})
             self._record_stage_model(tid, "build")
 
             tests_passed = self._tests_passed(build_result)
             if not tests_passed:
                 result.final_state = self.lifecycle.failure_state(failed_test=True)
-                self.mc.fail_ticket(tid, "Build/test stage did not produce a passing result")
+                failure = ToolExecutionError(
+                    "Build/test stage did not produce a passing result",
+                    error_code="build_test_failed",
+                    context={"ticket_id": tid, "build_result": build_result},
+                    recoverable=self.lifecycle.should_retry_execution(result.execution_retries),
+                )
+                result.phase_results["error"] = failure.to_dict()
+                escalation_reason = self.state_machine.fail(
+                    failure,
+                    {"execution_retries": result.execution_retries, "review_loops": result.review_loops},
+                )
+                if escalation_reason.endswith("human"):
+                    self._handle_human_escalation(tid, title, desc, escalation_reason, branch=branch)
+                self._timeline(tid, "failed", failure.message, {"build_result": build_result})
+                self.mc.fail_ticket(tid, failure.message)
                 print(f"  ❌ Build/test stage did not pass lifecycle policy", flush=True)
                 return self._finalize_result(result, task_type=task_type, start_time=start)
 
             # Step 5: POST-BUILD MULTI-PERSPECTIVE REVIEW
             if self.git.has_changes():
+                self.state_machine.transition(ExecutionState.POST_REVIEW, {"branch": branch})
                 self._renew_lease(tid, "post_review")
+                self._timeline(tid, "review_started", f"Post-build review started for ticket {tid}", {"reviewers": len(POST_BUILD_ROLES)})
                 print(f"\n🔬 Step 5: Post-Build Review ({len(POST_BUILD_ROLES)} perspectives)", flush=True)
                 post_issues = self._run_post_build_review(tid, desc, context, plan, result)
                 result.post_review_issues = post_issues
@@ -281,18 +442,33 @@ class EngineeringPipeline:
 
                 if post_issues:
                     result.final_state = self.lifecycle.failure_state(failed_review=True)
-                    self.mc.fail_ticket(
-                        tid,
+                    failure = ToolExecutionError(
                         f"Post-review still found issues after {result.review_loops} retry loops",
+                        error_code="post_review_failed",
+                        context={"ticket_id": tid, "issues": post_issues[:10]},
+                        recoverable=self.lifecycle.should_retry_review(result.review_loops),
                     )
+                    result.phase_results["error"] = failure.to_dict()
+                    escalation_reason = self.state_machine.fail(
+                        failure,
+                        {"execution_retries": result.execution_retries, "review_loops": result.review_loops},
+                    )
+                    if escalation_reason.endswith("human"):
+                        self._handle_human_escalation(tid, title, desc, escalation_reason, branch=branch)
+                    self._timeline(tid, "failed", failure.message, {"issues": post_issues[:10]})
+                    self.mc.fail_ticket(tid, failure.message)
                     print(
                         f"  ❌ Post-review found blocking issues after {result.review_loops} retry loops",
                         flush=True,
                     )
                     return self._finalize_result(result, task_type=task_type, start_time=start)
 
+                self._timeline(tid, "review_passed", f"Post-build review passed for ticket {tid}", {"review_loops": result.review_loops})
+
                 # Step 6: COMPLETION
+                self.state_machine.transition(ExecutionState.COMPLETING, {"branch": branch})
                 self._renew_lease(tid, "completion")
+                self._timeline(tid, "completion_started", f"Completion stage started for ticket {tid}", {"branch": branch})
                 print(f"\n✅ Step 6: Completion", flush=True)
                 completion = self._complete_execution(
                     tid=tid,
@@ -310,37 +486,93 @@ class EngineeringPipeline:
                 result.done_state = completion.get("done_state", "")
                 result.final_state = completion.get("final_state", result.final_state)
                 result.auto_merge_reason = completion.get("auto_merge_reason", "")
+                if result.success:
+                    self.state_machine.transition(ExecutionState.IDLE, {"final_state": result.final_state or result.done_state})
+                else:
+                    failure = ToolExecutionError(
+                        completion.get("error", "Completion stage failed"),
+                        error_code="completion_failed",
+                        context={"ticket_id": tid, "completion": completion},
+                        recoverable=False,
+                    )
+                    result.phase_results["error"] = failure.to_dict()
+                    escalation_reason = self.state_machine.fail(
+                        failure,
+                        {"execution_retries": result.execution_retries, "review_loops": result.review_loops},
+                    )
+                    if escalation_reason.endswith("human"):
+                        self._handle_human_escalation(tid, title, desc, escalation_reason, branch=branch)
                 if result.success and result.unblocked_tickets:
                     print(f"  🔓 Unblocked {len(result.unblocked_tickets)} dependent tickets", flush=True)
             else:
                 result.final_state = self.lifecycle.failure_state(execution_failed=True)
-                self.mc.fail_ticket(tid, "No code changes produced")
+                failure = ToolExecutionError(
+                    "No code changes produced",
+                    error_code="no_code_changes",
+                    context={"ticket_id": tid, "branch": branch},
+                    recoverable=self.lifecycle.should_retry_execution(result.execution_retries),
+                )
+                result.phase_results["error"] = failure.to_dict()
+                escalation_reason = self.state_machine.fail(
+                    failure,
+                    {"execution_retries": result.execution_retries, "review_loops": result.review_loops},
+                )
+                if escalation_reason.endswith("human"):
+                    self._handle_human_escalation(tid, title, desc, escalation_reason, branch=branch)
+                self._timeline(tid, "failed", failure.message, {"branch": branch})
+                self.mc.fail_ticket(tid, failure.message)
                 print(f"  ⚠️ No changes produced", flush=True)
 
-        except Exception as e:
-            result.phase_results["error"] = str(e)
+        except ForgeFleetError as exc:
+            result.phase_results["error"] = exc.to_dict()
             if not result.final_state:
                 result.final_state = self.lifecycle.failure_state(execution_failed=True)
-            self.mc.fail_ticket(tid, str(e)[:500])
-            print(f"  ❌ Pipeline error: {e}", flush=True)
-            # Escalation trigger: if pipeline fails, escalate ownership
-            if self.ownership:
-                task = self.ownership.get_task(tid)
-                if task and task.owner_level != "human":
-                    ok, reason = self.ownership.escalate(tid)
-                    if ok:
-                        print(f"  ⬆️ Escalated to {reason}", flush=True)
-                        if reason.endswith("human"):
-                            self._handle_human_escalation(
-                                ticket_id=tid,
-                                title=title,
-                                description=desc,
-                                escalation_reason=reason,
-                                branch=branch,
-                            )
+            escalation_reason = self.state_machine.fail(
+                exc,
+                {"execution_retries": result.execution_retries, "review_loops": result.review_loops},
+            )
+            self._timeline(tid, "failed", f"Pipeline execution failed for ticket {tid}", {"error": exc.to_dict(), "branch": branch})
+            self.mc.fail_ticket(tid, exc.message[:500])
+            print(f"  ❌ Pipeline error: {exc}", flush=True)
+            if escalation_reason.endswith("human"):
+                self._handle_human_escalation(
+                    ticket_id=tid,
+                    title=title,
+                    description=desc,
+                    escalation_reason=escalation_reason,
+                    branch=branch,
+                )
+        except Exception as e:
+            wrapped = ToolExecutionError(
+                f"Pipeline execution failed for ticket {tid}: {e}",
+                error_code="pipeline_execution_failed",
+                context={"ticket_id": tid, "branch": branch, "error": str(e)},
+                recoverable=False,
+            )
+            result.phase_results["error"] = wrapped.to_dict()
+            if not result.final_state:
+                result.final_state = self.lifecycle.failure_state(execution_failed=True)
+            escalation_reason = self.state_machine.fail(
+                wrapped,
+                {"execution_retries": result.execution_retries, "review_loops": result.review_loops},
+            )
+            self._timeline(tid, "failed", f"Pipeline execution failed for ticket {tid}", {"error": wrapped.to_dict(), "branch": branch})
+            self.mc.fail_ticket(tid, wrapped.message[:500])
+            print(f"  ❌ Pipeline error: {wrapped}", flush=True)
+            if escalation_reason.endswith("human"):
+                self._handle_human_escalation(
+                    ticket_id=tid,
+                    title=title,
+                    description=desc,
+                    escalation_reason=escalation_reason,
+                    branch=branch,
+                )
         finally:
             self._set_repo_dir(self.base_repo_dir)
             self._cleanup_ticket_worktree(worktree_root, worktree_dir)
+            runtime_scope.__exit__(None, None, None)
+            self._active_ticket_id = ""
+            self._active_session_id = ""
 
         return self._finalize_result(result, task_type=task_type, start_time=start)
 
@@ -351,6 +583,8 @@ class EngineeringPipeline:
             return result
 
         result.total_time = time.time() - start_time
+        error_payload = result.phase_results.get("error", "")
+        error_text = error_payload if isinstance(error_payload, str) else json.dumps(error_payload)
         self.evolution.record_task(TaskRecord(
             task_id=result.ticket_id,
             title=result.title,
@@ -358,8 +592,19 @@ class EngineeringPipeline:
             total_time=result.total_time,
             success=result.success,
             pushed=result.success,
-            error=result.phase_results.get("error", ""),
+            error=error_text,
         ))
+        self._timeline(
+            result.ticket_id,
+            "completed" if result.success else "failed",
+            f"Pipeline finalized for ticket {result.ticket_id}",
+            {
+                "session_id": result.session_id,
+                "success": result.success,
+                "final_state": result.final_state,
+                "total_time": result.total_time,
+            },
+        )
         result.phase_results["_finalized"] = True
         return result
 
@@ -379,8 +624,16 @@ class EngineeringPipeline:
             self._renew_lease(ticket_id, f"build_attempt_{attempt}")
             try:
                 last_result = self._build(description, context, plan)
+            except ForgeFleetError as exc:
+                last_result = {"success": False, "error": exc.message, "error_code": exc.error_code}
             except Exception as e:
-                last_result = {"success": False, "error": str(e)}
+                wrapped = ToolExecutionError(
+                    f"Build stage failed: {e}",
+                    error_code="build_stage_failed",
+                    context={"ticket_id": ticket_id, "attempt": attempt, "error": str(e)},
+                    recoverable=True,
+                )
+                last_result = {"success": False, "error": wrapped.message, "error_code": wrapped.error_code}
 
             build_succeeded = self._build_succeeded(last_result)
             if build_succeeded and self.git.has_changes():
@@ -391,6 +644,7 @@ class EngineeringPipeline:
 
             attempt += 1
             result.execution_retries = attempt
+            self._timeline(ticket_id, "build_retry", f"Retrying build attempt {attempt}", {"last_result": last_result})
             print(
                 f"  🔁 Build retry {attempt}/{self.lifecycle.max_execution_retries} "
                 f"after unsuccessful execution",
@@ -409,11 +663,13 @@ class EngineeringPipeline:
         self._renew_lease(ticket_id, "post_review_initial")
         issues = self._review_current_changes(description)
         result.phase_results["post_review_attempt_0"] = issues
+        self._timeline(ticket_id, "review_completed", f"Initial post-build review finished with {len(issues)} issue(s)", {"issues": issues[:10]})
         self._record_stage_model(ticket_id, "post_review")
 
         while issues and self.lifecycle.should_retry_review(review_loops):
             review_loops += 1
             result.review_loops = review_loops
+            self._timeline(ticket_id, "review_retry", f"Starting review repair loop {review_loops}", {"issue_count": len(issues)})
             print(
                 f"  🔁 Review loop {review_loops}/{self.lifecycle.max_review_loops} "
                 f"to address {len(issues)} issue(s)",
@@ -503,9 +759,11 @@ class EngineeringPipeline:
                 mc_updated = "error" not in response
                 if mc_updated:
                     result.unblocked_tickets = self._unblock_dependents(tid)
+                    self._timeline(tid, "completed", f"Ticket {tid} auto-merged to main", {"branch": branch, "auto_merge_reason": auto_merge_reason})
                     print(f"  ✅ Auto-merged via lifecycle policy and pushed {branch}", flush=True)
             else:
                 auto_merge_reason = "merge_failed"
+                self._timeline(tid, "merge_failed", f"Auto-merge failed for ticket {tid}", {"branch": branch})
 
         if not merged:
             response = self.mc.update_ticket(
@@ -519,6 +777,7 @@ class EngineeringPipeline:
             )
             mc_updated = "error" not in response
             if mc_updated:
+                self._timeline(tid, "ready_for_review", f"Branch {branch} pushed and awaiting review", {"auto_merge_reason": auto_merge_reason})
                 print(f"  ✅ Pushed to {branch} (awaiting review: {auto_merge_reason})", flush=True)
 
         done_state = self.lifecycle.done_state(
@@ -684,10 +943,23 @@ Output:
         ]
         
         try:
-            response = llm.call(messages)
+            response = llm.call(
+                messages,
+                task_type="planning",
+                mode="pipeline_plan",
+                session_id=self._active_session_id,
+                ticket_id=str(ticket.get("id", "")),
+            )
             return response.get("content", "No plan generated")
-        except Exception:
-            return "Plan generation failed — proceeding with direct implementation"
+        except Exception as exc:
+            error = LLMError(
+                "Plan generation failed — proceeding with direct implementation",
+                error_code="plan_generation_failed",
+                context={"ticket_id": self._active_ticket_id, "error": str(exc)},
+                recoverable=True,
+            )
+            logger.warning("%s", error)
+            return error.message
     
     # ─── Step 3 & 5: Multi-Perspective Review ───────
     
@@ -726,7 +998,13 @@ List any issues found. If everything looks good, say \"No issues.\"
 Be specific — file names, line references, exact problems."""},
             ]
             try:
-                response = llm.call(messages)
+                response = llm.call(
+                    messages,
+                    task_type=f"{phase}_review",
+                    mode="pipeline_review",
+                    session_id=self._active_session_id,
+                    ticket_id=self._active_ticket_id,
+                )
                 result = response.get("content", "")
                 if result and "no issues" not in result.lower()[:50]:
                     return [f"[{role.title}] {result[:500]}"]
@@ -823,112 +1101,55 @@ Be specific — file names, line references, exact problems."""},
     # ─── Tools ──────────────────────────────────────
     
     def _build_tools(self) -> list:
-        """Build file tools scoped to the active repo with traversal safeguards."""
-        repo = os.path.abspath(self.repo_dir)
-        allowed_commands = {
-            "git", "python", "python3", "python3.11", "python3.12", "pytest",
-            "pip", "pip3", "uv", "ruff", "mypy", "npm", "pnpm", "yarn",
-            "node", "npx", "cargo", "go", "make", "just", "ls", "cat",
-            "grep", "sed", "find", "echo", "bash", "sh",
-        }
-        blocked_shell_tokens = ("&&", "||", ";", "|", "`", "$(")
+        """Expose the registry/executor through the legacy Tool interface used by agents."""
+        try:
+            self.mcp_client.connect_all()
+            for mcp_tool in self.mcp_client.as_tools():
+                original_func = mcp_tool.func
 
-        def resolve_repo_path(path_value: str, allow_missing: bool = False) -> str:
-            rel = (path_value or ".").strip() or "."
-            candidate = os.path.abspath(os.path.join(repo, rel))
-            if os.path.commonpath([repo, candidate]) != repo:
-                raise ValueError(f"Path escapes repository root: {path_value}")
-            if not allow_missing and not os.path.exists(candidate):
-                raise FileNotFoundError(path_value)
-            return candidate
+                def make_mcp_handler(tool_name: str, func):
+                    def _handler(args: dict, _context: ExecutionContext):
+                        started = time.time()
+                        try:
+                            result = func(**args)
+                        except Exception as exc:
+                            raise ToolExecutionError(
+                                f"MCP tool error ({tool_name}): {exc}",
+                                error_code="mcp_tool_failed",
+                                context={"tool_name": tool_name, "error": str(exc)},
+                                recoverable=True,
+                            ) from exc
+                        rendered = result if isinstance(result, str) else json.dumps(result, default=str)
+                        self._record_tool_use(tool_name, args, rendered, int((time.time() - started) * 1000))
+                        return result
+                    return _handler
 
-        def rf(filepath=""):
-            try:
-                file_path = resolve_repo_path(filepath)
-                if not os.path.isfile(file_path):
-                    return f"Not found: {filepath}"
-                with open(file_path, encoding="utf-8", errors="ignore") as handle:
-                    content = handle.read()
-                return content[:4000] if len(content) > 4000 else content
-            except Exception as e:
-                return f"Error: {e}"
+                if mcp_tool.name not in {tool.name for tool in self.tool_registry.list_tools()}:
+                    self.tool_registry.register_mcp_tool(
+                        name=mcp_tool.name,
+                        description=mcp_tool.description,
+                        input_schema=mcp_tool.parameters,
+                        handler=make_mcp_handler(mcp_tool.name, original_func),
+                        permission_level=PermissionLevel.READ,
+                        timeout=30,
+                    )
+        except Exception as exc:
+            logger.warning("MCP tool discovery failed in pipeline: %s", exc)
 
-        def lf(directory=".", pattern=""):
-            try:
-                full = resolve_repo_path(directory or ".")
-                if not os.path.isdir(full):
-                    return f"Not found: {directory}"
-                exclude = {"target", "node_modules", ".git", "dist", ".next", "__pycache__"}
-                files = []
-                for root, dirs, fnames in os.walk(full):
-                    dirs[:] = [d for d in dirs if d not in exclude]
-                    for filename in fnames:
-                        if pattern and not filename.endswith(pattern):
-                            continue
-                        files.append(os.path.relpath(os.path.join(root, filename), repo))
-                    if len(files) > 30:
-                        break
-                return "\n".join(files[:30])
-            except Exception as e:
-                return f"Error: {e}"
+        legacy_tools = self.tool_registry.as_legacy_tools(
+            self.tool_executor,
+            context_factory=self._tool_execution_context,
+        )
+        for tool in legacy_tools:
+            original_func = tool.func
 
-        def wf(filepath="", content=""):
-            try:
-                file_path = resolve_repo_path(filepath, allow_missing=True)
-                parent = os.path.dirname(file_path)
-                if os.path.commonpath([repo, parent]) != repo:
-                    return f"Rejected path: {filepath}"
-                os.makedirs(parent, exist_ok=True)
-                with open(file_path, "w", encoding="utf-8") as handle:
-                    handle.write(content)
-                relative = os.path.relpath(file_path, repo)
-                return f"WRITTEN: {relative} ({len(content)} chars)"
-            except Exception as e:
-                return f"Error: {e}"
+            def make_logged_legacy_func(tool_name: str, func):
+                def _call(**kwargs):
+                    started = time.time()
+                    result = func(**kwargs)
+                    self._record_tool_use(tool_name, kwargs, result, int((time.time() - started) * 1000))
+                    return result
+                return _call
 
-        def guard_command(command: str) -> tuple[bool, str, list[str]]:
-            if not command or not command.strip():
-                return False, "Rejected: empty command", []
-            if any(token in command for token in blocked_shell_tokens):
-                return False, "Rejected: shell operators are blocked", []
-            try:
-                args = shlex.split(command)
-            except ValueError as exc:
-                return False, f"Rejected: invalid command syntax ({exc})", []
-            if not args:
-                return False, "Rejected: empty command", []
-            if args[0] not in allowed_commands:
-                return False, f"Rejected command '{args[0]}' — not in allowlist", []
-
-            for arg in args[1:]:
-                if arg.startswith("/") or arg == ".." or arg.startswith("../"):
-                    return False, f"Rejected path argument: {arg}", []
-            return True, "", args
-
-        def rc(command=""):
-            ok, reason, args = guard_command(command)
-            if not ok:
-                return reason
-            try:
-                result = subprocess.run(
-                    args,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    cwd=repo,
-                    shell=False,
-                )
-                return (result.stdout + result.stderr)[:3000]
-            except Exception as e:
-                return str(e)
-
-        return [
-            Tool(name="read_file", description="Read a file",
-                 parameters={"type": "object", "properties": {"filepath": {"type": "string"}}, "required": ["filepath"]}, func=rf),
-            Tool(name="list_files", description="List files",
-                 parameters={"type": "object", "properties": {"directory": {"type": "string"}, "pattern": {"type": "string"}}}, func=lf),
-            Tool(name="write_file", description="Create/overwrite a file",
-                 parameters={"type": "object", "properties": {"filepath": {"type": "string"}, "content": {"type": "string"}}, "required": ["filepath", "content"]}, func=wf),
-            Tool(name="run_command", description="Run guarded shell command",
-                 parameters={"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, func=rc),
-        ]
+            tool.func = make_logged_legacy_func(tool.name, original_func)
+        return legacy_tools

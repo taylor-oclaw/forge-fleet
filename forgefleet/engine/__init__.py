@@ -1,10 +1,14 @@
 """ForgeFleet Engine — native agent orchestration. Zero external dependencies."""
 from .agent import Agent
-from .task import Task
 from .crew import Crew
-from .llm import LLM
-from .tool import Tool
+from .errors import ForgeFleetError
 from .fleet_router import FleetRouter
+from .llm import LLM
+from .state_machine import ExecutionState, ExecutionStateMachine
+from .task import Task
+from .tool import Tool
+from .tool_executor import ToolExecutor, ToolExecutionResult
+from .tool_registry import RegisteredTool, ToolRegistry
 
 # Strengthen tool-use instructions in prompts
 # Ensure that the code often writes files using write_file instead of just describing them.
