@@ -233,7 +233,7 @@ export function ChatStudio() {
   const [error, setError] = useState<string | null>(null)
 
   // Agent mode state
-  const [agentMode, setAgentMode] = useState(false)
+  const [agentMode, setAgentMode] = useState(true)
   const [agentSessionId, setAgentSessionId] = useState<string | null>(null)
   const [agentRunning, setAgentRunning] = useState(false)
   const [selectedFleetLlm, setSelectedFleetLlm] = useState(FLEET_LLMS[0].url)

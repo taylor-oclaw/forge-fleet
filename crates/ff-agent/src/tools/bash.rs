@@ -59,6 +59,22 @@ impl AgentTool for BashTool {
             ));
         }
 
+        // Intercept bare SSH commands to fleet nodes and make them non-interactive
+        let command = rewrite_fleet_ssh(command);
+        let command = command.as_str();
+
+        // Block interactive commands that would hang forever
+        if is_interactive_command(command) {
+            return AgentToolResult::err(format!(
+                "Interactive command blocked: {command}\n\
+                 This command opens an interactive session that would hang.\n\
+                 Instead, include the command to run:\n\
+                 - ssh user@host 'command here'\n\
+                 - python3 -c 'print(1+1)'\n\
+                 - mysql -e 'SELECT 1'"
+            ));
+        }
+
         let shell_state = ctx.shell_state.lock().await;
         let effective_cwd = shell_state
             .cwd
@@ -136,6 +152,79 @@ async fn run_shell(script: &str) -> anyhow::Result<(i32, String, String)> {
     debug!(exit_code, stdout_len = stdout.len(), stderr_len = stderr.len(), "bash execution complete");
 
     Ok((exit_code, stdout, stderr))
+}
+
+/// Fleet node name → IP mapping.
+fn fleet_node_ip(name: &str) -> Option<(&'static str, &'static str)> {
+    match name.to_ascii_lowercase().as_str() {
+        "taylor" => Some(("192.168.5.100", "venkat")),
+        "marcus" => Some(("192.168.5.102", "marcus")),
+        "sophie" => Some(("192.168.5.103", "sophie")),
+        "priya" => Some(("192.168.5.104", "priya")),
+        "james" => Some(("192.168.5.108", "james")),
+        "ace" => Some(("192.168.5.105", "ace")),
+        _ => None,
+    }
+}
+
+/// Rewrite bare SSH commands to fleet nodes into non-interactive commands.
+/// "ssh sophie" → "ssh -o ConnectTimeout=10 sophie@192.168.5.103 'hostname && uptime && free -h && df -h / && ps aux --sort=-%cpu | head -5'"
+fn rewrite_fleet_ssh(command: &str) -> String {
+    let trimmed = command.trim();
+
+    // Match "ssh <nodename>" with no additional command
+    if trimmed.starts_with("ssh ") {
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() == 2 {
+            let target = parts[1];
+            // Check if target is a fleet node name (no @ sign, no IP)
+            if !target.contains('@') && !target.contains('.') {
+                if let Some((ip, user)) = fleet_node_ip(target) {
+                    return format!(
+                        "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no {user}@{ip} 'echo \"=== {target} ({ip}) ===\"  && hostname && echo \"---\" && uptime && echo \"---\" && uname -sr && echo \"---\" && free -h 2>/dev/null || sysctl -n hw.memsize 2>/dev/null && echo \"---\" && df -h / && echo \"---\" && echo \"Running processes:\" && ps aux --sort=-%cpu 2>/dev/null | head -6 || ps aux | head -6'"
+                    );
+                }
+            }
+        }
+    }
+
+    // Match "ssh into <nodename>" pattern
+    if trimmed.starts_with("ssh into ") || trimmed.starts_with("ssh to ") {
+        let node_name = trimmed.split_whitespace().last().unwrap_or("");
+        if let Some((ip, user)) = fleet_node_ip(node_name) {
+            return format!(
+                "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no {user}@{ip} 'echo \"=== {node_name} ({ip}) ===\" && hostname && uptime && uname -sr'"
+            );
+        }
+    }
+
+    command.to_string()
+}
+
+/// Detect commands that would open an interactive session and hang.
+fn is_interactive_command(command: &str) -> bool {
+    let trimmed = command.trim();
+
+    // Bare SSH without a command (already handled by rewrite, but catch edge cases)
+    if trimmed == "ssh" { return true; }
+
+    // Interactive interpreters without -c flag
+    let interactive = [
+        "python3", "python", "node", "irb", "ghci", "lua",
+        "mysql", "psql", "sqlite3", "redis-cli", "mongo",
+        "vim", "vi", "nano", "emacs", "less", "more", "top", "htop",
+        "bash", "zsh", "sh", "fish",
+    ];
+
+    // Only block if it's the bare command with no arguments
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    let word_count = trimmed.split_whitespace().count();
+
+    if word_count == 1 && interactive.contains(&first_word) {
+        return true;
+    }
+
+    false
 }
 
 fn is_blocked_command(command: &str) -> bool {
