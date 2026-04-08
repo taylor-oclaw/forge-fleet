@@ -248,10 +248,12 @@ async fn run_event_loop(
                             continue;
                         }
 
+                        // Detect dragged file/folder paths and auto-contextualize
+                        let prompt = detect_dropped_content(&trimmed);
+
                         // Agent run
                         app.submit_input();
                         let mut session = app.tab_mut().session.take().unwrap_or_else(|| AgentSession::new(config.clone()));
-                        let prompt = trimmed;
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
                         let handle = tokio::spawn(async move {
@@ -373,6 +375,49 @@ async fn handle_stop() -> Result<()> {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
+
+/// Detect if input is a dropped file/folder path and wrap with appropriate context.
+fn detect_dropped_content(input: &str) -> String {
+    let trimmed = input.trim().trim_matches('\'').trim_matches('"');
+    let path = std::path::Path::new(trimmed);
+
+    // Only trigger if it looks like an absolute path that exists
+    if !trimmed.starts_with('/') || !path.exists() {
+        return input.to_string();
+    }
+
+    if path.is_dir() {
+        format!("I've dropped a folder: {trimmed}\nPlease explore this directory and tell me what's in it. Use Glob and Read to understand the contents.")
+    } else {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        match ext.as_str() {
+            // Images
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => {
+                format!("I've dropped an image: {trimmed}\nPlease analyze this image using PhotoAnalysis with file_path=\"{trimmed}\"")
+            }
+            // Videos
+            "mp4" | "mov" | "avi" | "mkv" | "webm" => {
+                format!("I've dropped a video: {trimmed}\nPlease analyze this video using VideoAnalysis with file_path=\"{trimmed}\" action=\"info\"")
+            }
+            // Audio
+            "mp3" | "wav" | "flac" | "m4a" | "ogg" => {
+                format!("I've dropped an audio file: {trimmed}\nPlease analyze using AudioAnalysis with file_path=\"{trimmed}\" action=\"info\"")
+            }
+            // PDFs
+            "pdf" => {
+                format!("I've dropped a PDF: {trimmed}\nPlease extract and summarize the content using PdfExtract with file_path=\"{trimmed}\"")
+            }
+            // Spreadsheets
+            "csv" | "xlsx" | "xls" => {
+                format!("I've dropped a spreadsheet: {trimmed}\nPlease read and summarize using SpreadsheetQuery with file_path=\"{trimmed}\" action=\"head\"")
+            }
+            // Code/text files — just read them
+            _ => {
+                format!("I've dropped a file: {trimmed}\nPlease read and analyze this file using Read with file_path=\"{trimmed}\"")
+            }
+        }
+    }
+}
 
 fn detect_local_llm() -> Option<String> {
     let ports = [51000, 51001, 11434, 8080];
