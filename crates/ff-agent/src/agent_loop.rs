@@ -398,6 +398,35 @@ async fn run_agent_loop(
         let response = match response {
             Ok(resp) => resp,
             Err(err) => {
+                let err_str = format!("{err}");
+
+                // Detect context overflow and auto-compact
+                if err_str.contains("exceed_context_size") || err_str.contains("context size") || err_str.contains("too many tokens") {
+                    let before = session.messages.len();
+                    let compact_config = crate::compaction::CompactionConfig {
+                        context_window_tokens: 8192, // conservative — match server
+                        trigger_threshold: 0.5,
+                        keep_recent_messages: 4,
+                        target_free_tokens: 4000,
+                    };
+                    session.messages = crate::compaction::compact_messages(&session.messages, &compact_config);
+                    let after = session.messages.len();
+                    session.usage.compaction_count += 1;
+
+                    emit(&event_tx, AgentEvent::Compaction {
+                        session_id: session_id.clone(),
+                        messages_before: before,
+                        messages_after: after,
+                    });
+                    emit(&event_tx, AgentEvent::Status {
+                        session_id: session_id.clone(),
+                        message: format!("Context overflow — auto-compacted {before} → {after} messages. Retrying..."),
+                    });
+
+                    // Retry this turn after compaction
+                    continue;
+                }
+
                 let msg = format!("LLM request failed: {err}");
                 emit(
                     &event_tx,

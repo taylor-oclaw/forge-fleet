@@ -26,10 +26,10 @@ pub struct CompactionConfig {
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            context_window_tokens: 32_768,
-            trigger_threshold: 0.80,
-            keep_recent_messages: 6,
-            target_free_tokens: 8_000,
+            context_window_tokens: 8_192, // conservative default — matches common llama-server config
+            trigger_threshold: 0.60,      // compact earlier to avoid overflow
+            keep_recent_messages: 4,
+            target_free_tokens: 3_000,
         }
     }
 }
