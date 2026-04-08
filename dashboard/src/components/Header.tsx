@@ -14,7 +14,7 @@ export function Header({
   lastEvent: _lastEvent,
 }: HeaderProps) {
   return (
-    <header className="border-b border-slate-800 bg-slate-950/90 px-4 py-2 backdrop-blur">
+    <header className="border-b border-slate-800 bg-[#09090B]/95 px-4 py-2 backdrop-blur">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-violet-500/30 bg-violet-500/10">

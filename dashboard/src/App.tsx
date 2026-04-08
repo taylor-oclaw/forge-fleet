@@ -38,7 +38,7 @@ function Shell() {
   }, [darkMode])
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-[#09090B] text-zinc-100">
       <CommandPalette />
       <Header
         wsConnected={connected}

@@ -49,7 +49,7 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
 
   return (
-    <aside className={`flex-shrink-0 border-b border-slate-800 bg-slate-900/50 transition-all duration-200 md:border-b-0 md:border-r ${
+    <aside className={`flex-shrink-0 border-b border-slate-800 bg-[#18181B]/80 transition-all duration-200 md:border-b-0 md:border-r ${
       collapsed ? 'md:w-14' : 'w-full md:w-52'
     } p-2`}>
 
