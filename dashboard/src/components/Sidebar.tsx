@@ -1,87 +1,104 @@
+import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
 
-type NavItem = {
-  to: string
-  label: string
-}
-
-type NavSection = {
-  title: string
-  items: NavItem[]
-}
+type NavItem = { to: string; label: string; icon: string }
+type NavSection = { title: string; icon: string; items: NavItem[] }
 
 const navSections: NavSection[] = [
   {
-    title: 'Fleet',
+    title: 'Fleet', icon: '🖥️',
     items: [
-      { to: '/', label: 'Fleet Overview' },
-      { to: '/topology', label: 'Topology' },
-      { to: '/models', label: 'Model Inventory' },
-      { to: '/model-hub', label: 'Model Hub' },
-      { to: '/tools', label: 'Tool Inventory' },
-      { to: '/metrics', label: 'Metrics' },
+      { to: '/', label: 'Overview', icon: '📊' },
+      { to: '/topology', label: 'Topology', icon: '🔗' },
+      { to: '/model-hub', label: 'Model Hub', icon: '🤖' },
+      { to: '/tools', label: 'Tools', icon: '🔧' },
+      { to: '/metrics', label: 'Metrics', icon: '📈' },
     ],
   },
   {
-    title: 'Operations',
+    title: 'Work', icon: '📋',
     items: [
-      { to: '/mission-control', label: 'Mission Control' },
-      { to: '/onboarding', label: 'Operator Onboarding' },
-      { to: '/my-tasks', label: 'My Tasks' },
-      { to: '/workflow', label: 'Workflow Workbench' },
-      { to: '/planning', label: 'Planning Hub' },
-      { to: '/projects', label: 'Projects' },
-      { to: '/chats', label: 'Chats' },
-      { to: '/chat', label: 'Chat Studio' },
-      { to: '/updates', label: 'Updates' },
-      { to: '/audit', label: 'Audit Log' },
+      { to: '/mission-control', label: 'Mission Control', icon: '🎯' },
+      { to: '/my-tasks', label: 'My Tasks', icon: '✅' },
+      { to: '/projects', label: 'Projects', icon: '📁' },
+      { to: '/planning', label: 'Planning', icon: '🗓️' },
     ],
   },
   {
-    title: 'Configuration',
+    title: 'AI Studio', icon: '⚡',
     items: [
-      { to: '/settings', label: 'Settings' },
-      { to: '/config', label: 'Config Editor' },
-      { to: '/llm-proxy', label: 'LLM Proxy' },
+      { to: '/chat', label: 'Chat Studio', icon: '💬' },
+      { to: '/chats', label: 'Chats', icon: '📝' },
+      { to: '/workflow', label: 'Workflows', icon: '🔄' },
+    ],
+  },
+  {
+    title: 'Admin', icon: '⚙️',
+    items: [
+      { to: '/settings', label: 'Settings', icon: '⚙️' },
+      { to: '/config', label: 'Config', icon: '📄' },
+      { to: '/llm-proxy', label: 'LLM Proxy', icon: '🔀' },
+      { to: '/audit', label: 'Audit Log', icon: '📜' },
+      { to: '/updates', label: 'Updates', icon: '🆙' },
+      { to: '/onboarding', label: 'Onboarding', icon: '📚' },
     ],
   },
 ]
 
 export function Sidebar() {
-  return (
-    <aside className="w-full border-b border-slate-800 bg-slate-900/50 p-3 md:w-72 md:border-b-0 md:border-r md:p-4">
-      <div className="mb-3 px-1">
-        <p className="text-[11px] uppercase tracking-wider text-slate-500">Navigation</p>
-        <p className="text-xs text-slate-400">Fleet state, operations, and runtime configuration</p>
-      </div>
+  const [collapsed, setCollapsed] = useState(false)
 
-      <nav className="space-y-4">
+  return (
+    <aside className={`flex-shrink-0 border-b border-slate-800 bg-slate-900/50 transition-all duration-200 md:border-b-0 md:border-r ${
+      collapsed ? 'md:w-14' : 'w-full md:w-52'
+    } p-2`}>
+
+      <button
+        onClick={() => setCollapsed(!collapsed)}
+        className="mb-2 hidden w-full rounded p-1 text-xs text-slate-600 hover:bg-slate-800 hover:text-slate-400 md:block"
+        title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      >
+        {collapsed ? '▸▸' : '◂◂'}
+      </button>
+
+      <nav className="space-y-3">
         {navSections.map((section) => (
-          <section key={section.title} className="space-y-2">
-            <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-              {section.title}
-            </h2>
-            <div className="grid grid-cols-2 gap-2 md:grid-cols-1">
+          <section key={section.title}>
+            {!collapsed && (
+              <h2 className="mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-slate-600">
+                {section.icon} {section.title}
+              </h2>
+            )}
+            <ul className={`space-y-0.5 ${collapsed ? '' : ''}`}>
               {section.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.to === '/'}
-                  className={({ isActive }) =>
-                    `rounded-md px-3 py-2 text-sm transition ${
-                      isActive
-                        ? 'bg-sky-500/20 text-sky-300'
-                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                    }`
-                  }
-                >
-                  {item.label}
-                </NavLink>
+                <li key={item.to}>
+                  <NavLink
+                    to={item.to}
+                    end={item.to === '/'}
+                    className={({ isActive }) =>
+                      `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${
+                        isActive
+                          ? 'bg-violet-500/15 text-violet-300 font-medium'
+                          : 'text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
+                      } ${collapsed ? 'justify-center px-0' : ''}`
+                    }
+                    title={collapsed ? item.label : undefined}
+                  >
+                    <span className="text-sm flex-shrink-0">{item.icon}</span>
+                    {!collapsed && <span className="truncate">{item.label}</span>}
+                  </NavLink>
+                </li>
               ))}
-            </div>
+            </ul>
           </section>
         ))}
       </nav>
+
+      {!collapsed && (
+        <div className="mt-3 border-t border-slate-800 pt-2 px-2 text-[10px] text-slate-600">
+          ForgeFleet v2026.4.7
+        </div>
+      )}
     </aside>
   )
 }

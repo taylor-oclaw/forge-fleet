@@ -240,8 +240,33 @@ async fn run_event_loop(
                         if trimmed.starts_with('/') {
                             let mut session = app.tab_mut().session.take().unwrap_or_else(|| AgentSession::new(config.clone()));
                             if let Some(output) = commands.try_execute(&trimmed, &mut session).await {
-                                app.tab_mut().messages.push(ff_terminal::messages::render_user_message(&trimmed));
-                                app.tab_mut().messages.push(ff_terminal::messages::render_assistant_message(&output));
+                                // Handle Focus Stack / Backlog commands
+                                if output.starts_with("PUSH:") {
+                                    let topic = &output[5..];
+                                    app.tab_mut().push_focus(topic, "", ff_agent::focus_stack::PushReason::Explicit);
+                                    app.tab_mut().messages.push(ff_terminal::messages::render_status(&format!("Pushed to Focus Stack: {topic}")));
+                                } else if output == "POP" {
+                                    if let Some(topic) = app.tab_mut().pop_focus() {
+                                        app.tab_mut().messages.push(ff_terminal::messages::render_status(&format!("Resumed from Focus Stack: {topic}")));
+                                    } else {
+                                        app.tab_mut().messages.push(ff_terminal::messages::render_status("Focus Stack is empty"));
+                                    }
+                                } else if output.starts_with("BACKLOG_ADD:") {
+                                    let item = &output[12..];
+                                    app.tab_mut().add_backlog(item, "", ff_agent::focus_stack::BacklogPriority::Medium);
+                                    app.tab_mut().messages.push(ff_terminal::messages::render_status(&format!("Added to Backlog: {item}")));
+                                } else if output == "BACKLOG_VIEW" {
+                                    let items = app.tab().tracker.backlog.items();
+                                    if items.is_empty() {
+                                        app.tab_mut().messages.push(ff_terminal::messages::render_status("Backlog is empty"));
+                                    } else {
+                                        let list: Vec<String> = items.iter().enumerate().map(|(i, item)| format!("  {}. {}", i+1, item.title)).collect();
+                                        app.tab_mut().messages.push(ff_terminal::messages::render_assistant_message(&format!("Backlog:\n{}", list.join("\n"))));
+                                    }
+                                } else {
+                                    app.tab_mut().messages.push(ff_terminal::messages::render_user_message(&trimmed));
+                                    app.tab_mut().messages.push(ff_terminal::messages::render_assistant_message(&output));
+                                }
                                 app.tab_mut().input.submit();
                             }
                             app.tab_mut().session = Some(session);

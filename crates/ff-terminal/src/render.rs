@@ -105,6 +105,7 @@ fn render_left_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let tab = app.tab();
     let mut lines = Vec::new();
 
     // Project
@@ -116,18 +117,69 @@ fn render_left_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
         lines.push(Line::from(""));
     }
 
-    // Focus Stack (FILO)
-    lines.push(Line::from(Span::styled(" Focus Stack", Style::default().fg(Color::Rgb(251, 191, 36)).add_modifier(Modifier::BOLD))));
-    // TODO: wire to real focus stack data
-    lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
-    lines.push(Line::from(Span::styled("  Push: topic drift", Style::default().fg(Color::Rgb(71, 85, 105)))));
-    lines.push(Line::from(Span::styled("  Pop: resume prev", Style::default().fg(Color::Rgb(71, 85, 105)))));
+    // Focus Stack (FILO) — real data from session tracker
+    let stack_depth = tab.tracker.focus_stack.depth();
+    lines.push(Line::from(vec![
+        Span::styled(" Focus Stack ", Style::default().fg(Color::Rgb(251, 191, 36)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("({})", stack_depth), Style::default().fg(Color::Rgb(100, 116, 139))),
+    ]));
+
+    if stack_depth == 0 {
+        lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
+        lines.push(Line::from(Span::styled("  /push <topic>", Style::default().fg(Color::Rgb(71, 85, 105)))));
+    } else {
+        {
+            let summary = tab.tracker.focus_stack.summary();
+            for entry in summary.iter().take(5) {
+                let filled = (entry.progress * 5.0) as usize;
+                let progress_bar = format!("{}{}", "█".repeat(filled), "░".repeat(5usize.saturating_sub(filled)));
+                let title = entry.title.clone();
+                let age = entry.age.clone();
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {} ", entry.depth + 1), Style::default().fg(Color::Rgb(251, 191, 36))),
+                    Span::styled(title, Style::default().fg(Color::Rgb(226, 232, 240))),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    format!("    [{progress_bar}] {age}"),
+                    Style::default().fg(Color::Rgb(71, 85, 105)),
+                )));
+            }
+        }
+        lines.push(Line::from(Span::styled("  /pop to resume", Style::default().fg(Color::Rgb(71, 85, 105)))));
+    }
 
     lines.push(Line::from(""));
 
-    // Backlog (FIFO)
-    lines.push(Line::from(Span::styled(" Backlog", Style::default().fg(Color::Rgb(125, 211, 252)).add_modifier(Modifier::BOLD))));
-    lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
+    // Backlog (FIFO) — real data from session tracker
+    let backlog_count = tab.tracker.backlog.len();
+    lines.push(Line::from(vec![
+        Span::styled(" Backlog ", Style::default().fg(Color::Rgb(125, 211, 252)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("({})", backlog_count), Style::default().fg(Color::Rgb(100, 116, 139))),
+    ]));
+
+    if backlog_count == 0 {
+        lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
+        lines.push(Line::from(Span::styled("  /backlog <item>", Style::default().fg(Color::Rgb(71, 85, 105)))));
+    } else {
+        for (i, item) in tab.tracker.backlog.items().iter().enumerate().take(5) {
+            let priority_icon = match item.priority {
+                ff_agent::focus_stack::BacklogPriority::Urgent => "🔴",
+                ff_agent::focus_stack::BacklogPriority::High => "🟠",
+                ff_agent::focus_stack::BacklogPriority::Medium => "🟡",
+                ff_agent::focus_stack::BacklogPriority::Low => "🟢",
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {priority_icon} {}", item.title),
+                Style::default().fg(Color::Rgb(148, 163, 184)),
+            )));
+        }
+        if backlog_count > 5 {
+            lines.push(Line::from(Span::styled(
+                format!("  ... +{} more", backlog_count - 5),
+                Style::default().fg(Color::Rgb(71, 85, 105)),
+            )));
+        }
+    }
 
     lines.push(Line::from(""));
 

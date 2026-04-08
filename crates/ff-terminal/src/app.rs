@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use ff_agent::agent_loop::{AgentEvent, AgentSession, AgentSessionConfig};
 use ff_agent::commands::CommandRegistry;
+use ff_agent::focus_stack::{ConversationTracker, BacklogPriority, PushReason};
 
 use crate::input::InputState;
 use crate::messages::{DisplayMessage, render_user_message};
@@ -55,6 +56,7 @@ pub struct SessionTab {
     pub tokens_used: usize,
     pub tokens_total: usize,
     pub turn: u32,
+    pub tracker: ConversationTracker,
 }
 
 impl SessionTab {
@@ -73,7 +75,23 @@ impl SessionTab {
             tokens_used: 0,
             tokens_total: 32_768,
             turn: 0,
+            tracker: ConversationTracker::new(),
         }
+    }
+
+    /// Push current topic onto Focus Stack (conversation drifted).
+    pub fn push_focus(&mut self, title: &str, context: &str, reason: PushReason) {
+        self.tracker.focus_stack.push(title.to_string(), context.to_string(), reason);
+    }
+
+    /// Pop from Focus Stack (resume previous topic).
+    pub fn pop_focus(&mut self) -> Option<String> {
+        self.tracker.focus_stack.pop().map(|item| item.title)
+    }
+
+    /// Add to backlog.
+    pub fn add_backlog(&mut self, title: &str, description: &str, priority: BacklogPriority) {
+        self.tracker.backlog.add(title.to_string(), description.to_string(), priority);
     }
 }
 

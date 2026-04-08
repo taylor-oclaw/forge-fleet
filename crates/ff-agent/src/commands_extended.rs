@@ -37,6 +37,9 @@ pub fn extended_commands() -> Vec<Box<dyn Command>> {
         Box::new(ProjectCommand),
         Box::new(SessionSwitchCommand),
         Box::new(PasteImageCommand),
+        Box::new(PushCommand),
+        Box::new(PopCommand),
+        Box::new(BacklogCommand),
     ]
 }
 
@@ -549,5 +552,41 @@ impl Command for PasteImageCommand {
         }
 
         "No image in clipboard. Usage:\n  /paste-image /path/to/image.png\n  Or copy an image to clipboard first, then /paste-image".into()
+    }
+}
+
+// --- /push ---
+struct PushCommand;
+#[async_trait]
+impl Command for PushCommand {
+    fn name(&self) -> &str { "push" }
+    fn description(&self) -> &str { "Push current topic to Focus Stack (pause it for later)" }
+    async fn execute(&self, args: &str, _session: &mut AgentSession) -> String {
+        if args.is_empty() { return "Usage: /push <topic description>".into(); }
+        // The actual push happens in the TUI event handler since it needs the tab's tracker
+        format!("PUSH:{args}")
+    }
+}
+
+// --- /pop ---
+struct PopCommand;
+#[async_trait]
+impl Command for PopCommand {
+    fn name(&self) -> &str { "pop" }
+    fn description(&self) -> &str { "Pop from Focus Stack (resume previous topic)" }
+    async fn execute(&self, _args: &str, _session: &mut AgentSession) -> String {
+        "POP".into()
+    }
+}
+
+// --- /backlog ---
+struct BacklogCommand;
+#[async_trait]
+impl Command for BacklogCommand {
+    fn name(&self) -> &str { "backlog" }
+    fn description(&self) -> &str { "Add item to backlog or view backlog" }
+    async fn execute(&self, args: &str, _session: &mut AgentSession) -> String {
+        if args.is_empty() { return "BACKLOG_VIEW".into(); }
+        format!("BACKLOG_ADD:{args}")
     }
 }
