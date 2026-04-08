@@ -40,6 +40,8 @@ pub mod notebook_edit;
 pub mod plan_tools;
 pub mod project_mgmt;
 pub mod research;
+pub mod research_ext;
+pub mod uiux;
 pub mod skill_builder;
 pub mod tool_builder;
 pub mod send_message;
@@ -324,6 +326,17 @@ pub fn all_tools() -> Vec<Box<dyn AgentTool>> {
         Box::new(multimodal::SelfHealTool),
         Box::new(multimodal::AutoFleetTool),
         Box::new(multimodal::TaskDecomposerTool),
+        // UI/UX tools
+        Box::new(uiux::ColorPaletteTool),
+        Box::new(uiux::AccessibilityCheckTool),
+        Box::new(uiux::ComponentScaffoldTool),
+        Box::new(uiux::ResponsiveTestTool),
+        Box::new(uiux::CSSAnalyzerTool),
+        Box::new(uiux::StyleGuideGenTool),
+        // Extended research tools
+        Box::new(research_ext::CompetitorAnalysisTool),
+        Box::new(research_ext::TrendAnalysisTool),
+        Box::new(research_ext::MarketResearchTool),
     ]
 }
 
