@@ -415,11 +415,12 @@ async fn handle_start(leader: bool, config_path: &Path, working_dir: &Path) -> R
     println!("  Mode:   {}", if leader { "leader" } else { "auto" });
     println!();
 
-    // Check if already running
+    // Check if daemon is already running (check web UI port — only daemon serves this)
     let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build()?;
-    if client.get(format!("http://127.0.0.1:{}/health", ff_terminal::app::PORT_DAEMON))
-        .send().await.map(|r| r.status().is_success()).unwrap_or(false) {
-        println!("{GREEN}✓ ForgeFleet is already running{RESET}");
+    let daemon_running = client.get(format!("http://127.0.0.1:{}/health", ff_terminal::app::PORT_WEB))
+        .send().await.map(|r| r.status().is_success()).unwrap_or(false);
+    if daemon_running {
+        println!("{GREEN}✓ ForgeFleet daemon is already running{RESET}");
         println!("  Daemon:    http://localhost:{}", ff_terminal::app::PORT_DAEMON);
         println!("  Web UI:    http://localhost:{}", ff_terminal::app::PORT_WEB);
         println!("  WebSocket: ws://localhost:{}", ff_terminal::app::PORT_WS);
