@@ -1298,7 +1298,7 @@ fn start_self_heal_subsystem(
                                 if loop_cfg.auto_adopt {
                                     let ssh_cmd = format!(
                                         "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no {}@{} \
-                                         'pgrep -f llama-server || (nohup llama-server -m ~/models/*.gguf --host 0.0.0.0 --port 51000 --ctx-size 32768 --jinja -ngl 999 &>/tmp/llama.log &)' 2>/dev/null",
+                                         'pgrep -f llama-server || (nohup llama-server -m ~/models/*/*.gguf --host 0.0.0.0 --port 51000 --ctx-size 32768 --jinja -ngl 0 --no-warmup </dev/null &>/tmp/llama.log &)' 2>/dev/null",
                                         name, ip
                                     );
                                     let _ = tokio::process::Command::new("bash")
