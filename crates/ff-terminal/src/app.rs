@@ -1,5 +1,6 @@
 //! App state — the central state container for ForgeFleet Terminal.
 
+use std::path::PathBuf;
 
 use ff_agent::agent_loop::{AgentEvent, AgentSession, AgentSessionConfig};
 use ff_agent::commands::CommandRegistry;
@@ -7,54 +8,108 @@ use ff_agent::commands::CommandRegistry;
 use crate::input::InputState;
 use crate::messages::{DisplayMessage, render_user_message};
 
-/// Main application state.
+// ─── Port scheme (same on every node) ──────────────────────────────────────
+
+/// ForgeFleet daemon port
+pub const PORT_DAEMON: u16 = 51000;
+/// LLM inference API port
+pub const PORT_LLM: u16 = 51001;
+/// Web UI port
+pub const PORT_WEB: u16 = 51002;
+/// WebSocket port
+pub const PORT_WS: u16 = 51003;
+/// Metrics/Prometheus port
+pub const PORT_METRICS: u16 = 51004;
+
+// ─── Main app state ────────────────────────────────────────────────────────
+
 pub struct App {
-    /// Session configuration.
+    // Session
     pub config: AgentSessionConfig,
-    /// The agent session (created on first message).
     pub session: Option<AgentSession>,
-    /// Command registry for slash commands.
     pub commands: CommandRegistry,
-    /// All rendered messages for display.
+    pub session_id: String,
+
+    // Display
     pub messages: Vec<DisplayMessage>,
-    /// Input editor state.
     pub input: InputState,
-    /// Whether the agent is currently processing.
     pub is_running: bool,
-    /// Scroll offset for the message pane (lines from bottom).
     pub scroll_offset: u16,
-    /// Auto-scroll to bottom on new messages.
     pub auto_scroll: bool,
-    /// Current status message (shown in footer).
     pub status: String,
-    /// Frame counter for spinner animation.
     pub frame: u64,
-    /// Whether the app should quit.
     pub should_quit: bool,
-    /// Fleet node status cache.
-    pub fleet_status: Vec<FleetNodeStatus>,
-    /// Token usage.
+
+    // Fleet
+    pub fleet_nodes: Vec<FleetNode>,
+
+    // Current model/token tracking
+    pub current_model: String,
     pub tokens_used: usize,
     pub tokens_total: usize,
-    /// Current turn.
     pub turn: u32,
-    /// Session ID.
-    pub session_id: String,
+
+    // Project
+    pub current_project: Option<ProjectInfo>,
+    pub working_dir: PathBuf,
+
+    // Sessions
+    pub saved_sessions: Vec<SessionInfo>,
+    pub active_session_index: usize,
 }
 
+/// A fleet node with its ForgeFleet daemon and model status.
 #[derive(Debug, Clone)]
-pub struct FleetNodeStatus {
+pub struct FleetNode {
     pub name: String,
-    pub model: String,
+    pub ip: String,
+    /// Is the ForgeFleet daemon running on this node?
+    pub daemon_online: bool,
+    /// Models loaded on this node.
+    pub models: Vec<NodeModel>,
+}
+
+/// A model running on a fleet node.
+#[derive(Debug, Clone)]
+pub struct NodeModel {
+    pub name: String,
+    pub port: u16,
     pub online: bool,
+    pub context_window: usize,
+    pub tokens_used: usize,
+}
+
+/// Current project info.
+#[derive(Debug, Clone)]
+pub struct ProjectInfo {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Saved session for switching.
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub id: String,
+    pub name: String,
+    pub project: Option<String>,
+    pub message_count: usize,
+    pub last_active: String,
 }
 
 impl App {
     pub fn new(config: AgentSessionConfig) -> Self {
+        let working_dir = config.working_dir.clone();
+
+        // Detect project from working directory
+        let current_project = detect_project(&working_dir);
+
         Self {
             config,
             session: None,
             commands: CommandRegistry::new(),
+            session_id: String::new(),
+
             messages: Vec::new(),
             input: InputState::new(),
             is_running: false,
@@ -63,11 +118,19 @@ impl App {
             status: "Ready".into(),
             frame: 0,
             should_quit: false,
-            fleet_status: default_fleet_status(),
+
+            fleet_nodes: default_fleet_nodes(),
+
+            current_model: "auto".into(),
             tokens_used: 0,
             tokens_total: 32_768,
             turn: 0,
-            session_id: String::new(),
+
+            current_project,
+            working_dir,
+
+            saved_sessions: Vec::new(),
+            active_session_index: 0,
         }
     }
 
@@ -104,8 +167,6 @@ impl App {
     pub fn submit_input(&mut self) {
         let text = self.input.submit();
         if text.is_empty() { return; }
-
-        // Add user message to display
         self.messages.push(render_user_message(&text));
         self.is_running = true;
         self.status = "Thinking...".into();
@@ -121,15 +182,88 @@ impl App {
     pub fn total_message_lines(&self) -> usize {
         self.messages.iter().map(|m| m.lines.len()).sum()
     }
+
+    /// Get web UI URL for this machine.
+    pub fn web_url(&self) -> String {
+        format!("http://localhost:{}", PORT_WEB)
+    }
 }
 
-fn default_fleet_status() -> Vec<FleetNodeStatus> {
+/// Detect project from working directory (check for FORGEFLEET.md, Cargo.toml, package.json).
+fn detect_project(dir: &std::path::Path) -> Option<ProjectInfo> {
+    // Check for FORGEFLEET.md
+    let ff_md = dir.join("FORGEFLEET.md");
+    if ff_md.exists() {
+        let name = dir.file_name()?.to_str()?.to_string();
+        return Some(ProjectInfo {
+            id: name.clone(),
+            name,
+            path: dir.to_path_buf(),
+        });
+    }
+
+    // Check for Cargo.toml with package name
+    let cargo = dir.join("Cargo.toml");
+    if cargo.exists() {
+        let name = dir.file_name()?.to_str()?.to_string();
+        return Some(ProjectInfo {
+            id: name.clone(),
+            name,
+            path: dir.to_path_buf(),
+        });
+    }
+
+    // Check for package.json
+    let pkg = dir.join("package.json");
+    if pkg.exists() {
+        let name = dir.file_name()?.to_str()?.to_string();
+        return Some(ProjectInfo {
+            id: name.clone(),
+            name,
+            path: dir.to_path_buf(),
+        });
+    }
+
+    None
+}
+
+fn default_fleet_nodes() -> Vec<FleetNode> {
     vec![
-        FleetNodeStatus { name: "Taylor".into(), model: "Gemma-4-31B".into(), online: true },
-        FleetNodeStatus { name: "Marcus".into(), model: "Qwen2.5-32B".into(), online: true },
-        FleetNodeStatus { name: "Sophie".into(), model: "Qwen2.5-32B".into(), online: true },
-        FleetNodeStatus { name: "Priya".into(), model: "Qwen2.5-32B".into(), online: true },
-        FleetNodeStatus { name: "James".into(), model: "Qwen2.5-72B".into(), online: true },
-        FleetNodeStatus { name: "Ace".into(), model: "—".into(), online: false },
+        FleetNode {
+            name: "Taylor".into(), ip: "192.168.5.100".into(), daemon_online: false,
+            models: vec![
+                NodeModel { name: "Gemma-4-31B".into(), port: 51000, online: false, context_window: 262_144, tokens_used: 0 },
+                NodeModel { name: "Qwen3-Coder".into(), port: 51001, online: false, context_window: 32_768, tokens_used: 0 },
+            ],
+        },
+        FleetNode {
+            name: "Marcus".into(), ip: "192.168.5.102".into(), daemon_online: false,
+            models: vec![
+                NodeModel { name: "Qwen2.5-Coder-32B".into(), port: 51000, online: false, context_window: 32_768, tokens_used: 0 },
+            ],
+        },
+        FleetNode {
+            name: "Sophie".into(), ip: "192.168.5.103".into(), daemon_online: false,
+            models: vec![
+                NodeModel { name: "Qwen2.5-Coder-32B".into(), port: 51000, online: false, context_window: 32_768, tokens_used: 0 },
+            ],
+        },
+        FleetNode {
+            name: "Priya".into(), ip: "192.168.5.104".into(), daemon_online: false,
+            models: vec![
+                NodeModel { name: "Qwen2.5-Coder-32B".into(), port: 51000, online: false, context_window: 32_768, tokens_used: 0 },
+            ],
+        },
+        FleetNode {
+            name: "James".into(), ip: "192.168.5.108".into(), daemon_online: false,
+            models: vec![
+                NodeModel { name: "Qwen2.5-72B".into(), port: 51000, online: false, context_window: 32_768, tokens_used: 0 },
+                NodeModel { name: "Qwen3.5-9B".into(), port: 51001, online: false, context_window: 32_768, tokens_used: 0 },
+            ],
+        },
+        FleetNode {
+            name: "Ace".into(), ip: "192.168.5.105".into(), daemon_online: false,
+            models: vec![],
+        },
     ]
 }

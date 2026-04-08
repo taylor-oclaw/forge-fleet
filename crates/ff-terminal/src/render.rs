@@ -35,12 +35,17 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let spinner = if app.is_running { app.spinner() } else { "●" };
     let spinner_color = if app.is_running { Color::Rgb(251, 191, 36) } else { Color::Rgb(74, 222, 128) };
 
+    let project_name = app.current_project.as_ref()
+        .map(|p| format!(" │ {} ", p.name))
+        .unwrap_or_default();
+
     let header = Line::from(vec![
         Span::styled(format!(" {spinner} "), Style::default().fg(spinner_color)),
-        Span::styled("ForgeFleet Terminal", theme.header),
+        Span::styled("ForgeFleet", theme.header),
+        Span::styled(&project_name, Style::default().fg(Color::Rgb(139, 92, 246))),
         Span::styled(
-            format!("  │  Model: {}  │  Turn: {}/{}  │  {}",
-                &app.config.model[..app.config.model.len().min(20)],
+            format!("│ Model: {} │ Turn: {}/{} │ {}",
+                &app.current_model[..app.current_model.len().min(25)],
                 app.turn, app.config.max_turns,
                 &app.config.llm_base_url,
             ),
@@ -120,26 +125,61 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     let mut lines = Vec::new();
 
-    // Fleet nodes
-    for node in &app.fleet_status {
-        let (icon, color) = if node.online {
+    // Project info
+    if let Some(project) = &app.current_project {
+        lines.push(Line::from(vec![
+            Span::styled(" Project: ", Style::default().fg(Color::Rgb(100, 116, 139))),
+            Span::styled(&project.name, Style::default().fg(Color::Rgb(139, 92, 246)).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    // Fleet nodes with daemon status + models
+    for node in &app.fleet_nodes {
+        let (daemon_icon, daemon_color) = if node.daemon_online {
             ("●", Color::Rgb(74, 222, 128))
         } else {
             ("○", Color::Rgb(248, 113, 113))
         };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {icon} "), Style::default().fg(color)),
-            Span::styled(&node.name, Style::default().fg(theme.fg)),
+            Span::styled(format!(" {daemon_icon} "), Style::default().fg(daemon_color)),
+            Span::styled(&node.name, Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({})", node.ip), Style::default().fg(Color::Rgb(71, 85, 105))),
         ]));
-        lines.push(Line::from(Span::styled(
-            format!("   {}", node.model),
-            Style::default().fg(Color::Rgb(100, 116, 139)),
-        )));
+
+        // Models on this node
+        for model in &node.models {
+            let (model_icon, model_color) = if model.online {
+                ("▸", Color::Rgb(74, 222, 128))
+            } else {
+                ("▹", Color::Rgb(100, 116, 139))
+            };
+            let token_pct = if model.context_window > 0 {
+                (model.tokens_used as f64 / model.context_window as f64 * 100.0) as u16
+            } else { 0 };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("   {model_icon} "), Style::default().fg(model_color)),
+                Span::styled(&model.name, Style::default().fg(Color::Rgb(148, 163, 184))),
+            ]));
+            if model.online && model.context_window > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("     {}K ctx | {token_pct}%", model.context_window / 1024),
+                    Style::default().fg(Color::Rgb(71, 85, 105)),
+                )));
+            }
+        }
+        if node.models.is_empty() {
+            lines.push(Line::from(Span::styled("   no models", Style::default().fg(Color::Rgb(71, 85, 105)))));
+        }
     }
 
-    // Token gauge
+    // Current model tokens
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" Tokens", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled(
+        format!(" Model: {}", app.current_model),
+        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+    )));
 
     let pct = if app.tokens_total > 0 {
         (app.tokens_used as f64 / app.tokens_total as f64 * 100.0) as u16
@@ -152,6 +192,13 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     lines.push(Line::from(Span::styled(
         format!(" {}/{} ({pct}%)", app.tokens_used, app.tokens_total),
         Style::default().fg(Color::Rgb(100, 116, 139)),
+    )));
+
+    // Web UI link
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(" Web: {}", app.web_url()),
+        Style::default().fg(Color::Rgb(99, 102, 241)),
     )));
 
     let paragraph = Paragraph::new(lines);

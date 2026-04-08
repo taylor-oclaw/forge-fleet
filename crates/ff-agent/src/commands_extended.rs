@@ -33,6 +33,9 @@ pub fn extended_commands() -> Vec<Box<dyn Command>> {
         Box::new(PluginsCommand),
         Box::new(SkillsCommand),
         Box::new(OutputStyleCommand),
+        Box::new(WebCommand),
+        Box::new(ProjectCommand),
+        Box::new(SessionSwitchCommand),
     ]
 }
 
@@ -448,6 +451,59 @@ impl Command for OutputStyleCommand {
         match args {
             "concise" | "normal" | "verbose" => format!("Output style set to: {args}"),
             _ => "Usage: /output-style concise|normal|verbose".into(),
+        }
+    }
+}
+
+// --- /web ---
+struct WebCommand;
+#[async_trait]
+impl Command for WebCommand {
+    fn name(&self) -> &str { "web" }
+    fn description(&self) -> &str { "Open ForgeFleet web UI in browser" }
+    async fn execute(&self, _args: &str, _session: &mut AgentSession) -> String {
+        let url = "http://localhost:51002";
+        #[cfg(target_os = "macos")]
+        { let _ = tokio::process::Command::new("open").arg(url).output().await; }
+        #[cfg(target_os = "linux")]
+        { let _ = tokio::process::Command::new("xdg-open").arg(url).output().await; }
+        format!("Opening web UI: {url}")
+    }
+}
+
+// --- /project ---
+struct ProjectCommand;
+#[async_trait]
+impl Command for ProjectCommand {
+    fn name(&self) -> &str { "project" }
+    fn description(&self) -> &str { "Show or switch current project" }
+    async fn execute(&self, args: &str, session: &mut AgentSession) -> String {
+        if args.is_empty() {
+            let dir = &session.config.working_dir;
+            format!("Current project: {}\nWorking dir: {}", dir.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"), dir.display())
+        } else {
+            let path = std::path::PathBuf::from(args);
+            if path.exists() {
+                session.config.working_dir = path.clone();
+                format!("Switched to project: {}", path.display())
+            } else {
+                format!("Directory not found: {args}")
+            }
+        }
+    }
+}
+
+// --- /sessions ---
+struct SessionSwitchCommand;
+#[async_trait]
+impl Command for SessionSwitchCommand {
+    fn name(&self) -> &str { "switch" }
+    fn description(&self) -> &str { "Switch to a different chat session or create a new one" }
+    async fn execute(&self, args: &str, _session: &mut AgentSession) -> String {
+        if args.is_empty() || args == "new" {
+            "Creating new session. Use /switch <session_id> to switch back.".into()
+        } else {
+            format!("Switching to session: {args}\nUse /resume {args} to load the session history.")
         }
     }
 }
