@@ -21,6 +21,8 @@ import { Updates } from './pages/Updates'
 import { WorkflowWorkbench } from './pages/WorkflowWorkbench'
 import { Settings } from './pages/Settings'
 import { Chats } from './pages/Chats'
+import { ToolInventory } from './pages/ToolInventory'
+import { ModelHub } from './pages/ModelHub'
 
 function Shell() {
   const [darkMode, setDarkMode] = useState(() => {
@@ -61,6 +63,8 @@ export default function App() {
         <Route index element={<FleetOverview />} />
         <Route path="nodes/:nodeId" element={<NodeDetail />} />
         <Route path="models" element={<ModelInventory />} />
+        <Route path="model-hub" element={<ModelHub />} />
+        <Route path="tools" element={<ToolInventory />} />
         <Route path="settings" element={<Settings />} />
         <Route path="config" element={<ConfigEditor />} />
         <Route path="mission-control" element={<MissionControl />} />

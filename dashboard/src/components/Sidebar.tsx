@@ -17,6 +17,8 @@ const navSections: NavSection[] = [
       { to: '/', label: 'Fleet Overview' },
       { to: '/topology', label: 'Topology' },
       { to: '/models', label: 'Model Inventory' },
+      { to: '/model-hub', label: 'Model Hub' },
+      { to: '/tools', label: 'Tool Inventory' },
       { to: '/metrics', label: 'Metrics' },
     ],
   },
