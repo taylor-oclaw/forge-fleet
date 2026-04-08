@@ -299,12 +299,19 @@ async fn run_event_loop(
                         app.tab_mut().input.compute_suggestions(command_list);
                         app.tab_mut().input.next_suggestion();
                     }
-                    (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
                         app.tab_mut().input.insert_char(c);
                         if app.tab_mut().input.text.starts_with('/') {
                             app.tab_mut().input.compute_suggestions(command_list);
                         }
                     }
+                    // Tab management (MUST be before arrow key handlers)
+                    (KeyCode::Char('t'), KeyModifiers::CONTROL) => { app.new_tab(); }
+                    (KeyCode::Char('w'), KeyModifiers::CONTROL) => { app.close_tab(); }
+                    (KeyCode::Right, KeyModifiers::CONTROL) => { app.next_tab(); }
+                    (KeyCode::Left, KeyModifiers::CONTROL) => { app.prev_tab(); }
+
+                    // Text editing
                     (KeyCode::Backspace, _) => app.tab_mut().input.backspace(),
                     (KeyCode::Delete, _) => app.tab_mut().input.delete(),
                     (KeyCode::Left, _) => app.tab_mut().input.move_left(),
@@ -320,12 +327,6 @@ async fn run_event_loop(
                         let so = app.tab_mut().scroll_offset;
                         if so > 10 { app.tab_mut().scroll_offset -= 10; } else { app.tab_mut().scroll_offset = 0; app.tab_mut().auto_scroll = true; }
                     }
-
-                    // Tab management
-                    (KeyCode::Char('t'), KeyModifiers::CONTROL) => { app.new_tab(); }
-                    (KeyCode::Char('w'), KeyModifiers::CONTROL) => { app.close_tab(); }
-                    (KeyCode::Right, KeyModifiers::CONTROL) => { app.next_tab(); }
-                    (KeyCode::Left, KeyModifiers::CONTROL) => { app.prev_tab(); }
 
                     _ => {}
                 }
