@@ -1269,6 +1269,57 @@ fn start_self_heal_subsystem(
                     } else {
                         info!(healthy, managed, "self-heal health sweep complete");
                     }
+
+                    // Fleet-wide health check — check remote nodes via HTTP
+                    let fleet_nodes = vec![
+                        ("taylor", "192.168.5.100"),
+                        ("marcus", "192.168.5.102"),
+                        ("sophie", "192.168.5.103"),
+                        ("priya", "192.168.5.104"),
+                        ("james", "192.168.5.108"),
+                    ];
+
+                    let http = reqwest::Client::builder()
+                        .timeout(Duration::from_secs(5))
+                        .build()
+                        .unwrap_or_default();
+
+                    let mut fleet_healthy = 0u32;
+                    let mut fleet_issues = Vec::new();
+
+                    for (name, ip) in &fleet_nodes {
+                        let url = format!("http://{}:51000/health", ip);
+                        match http.get(&url).send().await {
+                            Ok(r) if r.status().is_success() => { fleet_healthy += 1; }
+                            _ => {
+                                fleet_issues.push(format!("{name} ({ip})"));
+
+                                // Attempt remote restart via SSH (non-blocking)
+                                if loop_cfg.auto_adopt {
+                                    let ssh_cmd = format!(
+                                        "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no {}@{} \
+                                         'pgrep -f llama-server || (nohup llama-server -m ~/models/*.gguf --host 0.0.0.0 --port 51000 --ctx-size 32768 --jinja -ngl 999 &>/tmp/llama.log &)' 2>/dev/null",
+                                        name, ip
+                                    );
+                                    let _ = tokio::process::Command::new("bash")
+                                        .arg("-c")
+                                        .arg(&ssh_cmd)
+                                        .output()
+                                        .await;
+                                    info!(node = %name, ip = %ip, "self-heal attempted remote LLM restart");
+                                }
+                            }
+                        }
+                    }
+
+                    if !fleet_issues.is_empty() {
+                        warn!(
+                            healthy = fleet_healthy,
+                            total = fleet_nodes.len(),
+                            issues = ?fleet_issues,
+                            "fleet health: some nodes unhealthy"
+                        );
+                    }
                 }
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
