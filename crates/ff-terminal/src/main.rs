@@ -229,11 +229,15 @@ async fn run_event_loop(
                             continue;
                         }
 
-                        // If running, cancel current and start new
+                        // If running, show message that agent is busy — don't cancel
                         if app.tab().is_running {
-                            if let Some(handle) = agent_handle.take() { handle.abort(); }
-                            event_rx = None;
-                            app.tab_mut().is_running = false;
+                            app.tab_mut().messages.push(ff_terminal::messages::render_status(
+                                "Agent is still processing. Wait for it to finish, or press Esc to cancel."
+                            ));
+                            // Put the text back in input so user doesn't lose it
+                            app.tab_mut().input.text = trimmed;
+                            app.tab_mut().input.cursor = app.tab_mut().input.text.len();
+                            continue;
                         }
 
                         // Slash commands
