@@ -80,17 +80,69 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn render_body(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    // Split body into messages (80%) and sidebar (20%)
+    // Three columns: left sidebar (Focus Stack + Backlog), center (Chat), right sidebar (Fleet)
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(80),
-            Constraint::Percentage(20),
+            Constraint::Percentage(18),  // left: Focus Stack + Backlog
+            Constraint::Percentage(57),  // center: Chat
+            Constraint::Percentage(25),  // right: Fleet
         ])
         .split(area);
 
-    render_messages(frame, body_chunks[0], app, theme);
-    render_sidebar(frame, body_chunks[1], app, theme);
+    render_left_sidebar(frame, body_chunks[0], app, theme);
+    render_messages(frame, body_chunks[1], app, theme);
+    render_right_sidebar(frame, body_chunks[2], app, theme);
+}
+
+fn render_left_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(Span::styled(" Context ", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = Vec::new();
+
+    // Project
+    if let Some(project) = &app.current_project {
+        lines.push(Line::from(vec![
+            Span::styled(" 📁 ", Style::default()),
+            Span::styled(&project.name, Style::default().fg(Color::Rgb(139, 92, 246)).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    // Focus Stack (FILO)
+    lines.push(Line::from(Span::styled(" Focus Stack", Style::default().fg(Color::Rgb(251, 191, 36)).add_modifier(Modifier::BOLD))));
+    // TODO: wire to real focus stack data
+    lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
+    lines.push(Line::from(Span::styled("  Push: topic drift", Style::default().fg(Color::Rgb(71, 85, 105)))));
+    lines.push(Line::from(Span::styled("  Pop: resume prev", Style::default().fg(Color::Rgb(71, 85, 105)))));
+
+    lines.push(Line::from(""));
+
+    // Backlog (FIFO)
+    lines.push(Line::from(Span::styled(" Backlog", Style::default().fg(Color::Rgb(125, 211, 252)).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
+
+    lines.push(Line::from(""));
+
+    // Session info
+    lines.push(Line::from(Span::styled(" Session", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD))));
+    let tab = app.tab();
+    lines.push(Line::from(Span::styled(format!("  {}", tab.name), Style::default().fg(Color::Rgb(148, 163, 184)))));
+    lines.push(Line::from(Span::styled(format!("  Turn {}/{}", tab.turn, 30), Style::default().fg(Color::Rgb(100, 116, 139)))));
+    lines.push(Line::from(Span::styled(format!("  Model: {}", tab.current_model), Style::default().fg(Color::Rgb(100, 116, 139)))));
+
+    // Web link
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(format!(" 🌐 {}", app.web_url()), Style::default().fg(Color::Rgb(99, 102, 241)))));
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
 }
 
 fn render_messages(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -137,29 +189,17 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(paragraph, inner);
 }
 
-fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn render_right_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .title(Span::styled(" Info ", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" Fleet ", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let bar_max = (inner.width as usize).saturating_sub(6);
     let mut lines = Vec::new();
-
-    // Project
-    if let Some(project) = &app.current_project {
-        lines.push(Line::from(vec![
-            Span::styled(" 📁 ", Style::default()),
-            Span::styled(&project.name, Style::default().fg(Color::Rgb(139, 92, 246)).add_modifier(Modifier::BOLD)),
-        ]));
-        lines.push(Line::from(""));
-    }
-
-    // ── Fleet ──
-    lines.push(Line::from(Span::styled(" Fleet", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD))));
 
     for node in &app.fleet_nodes {
         // Computer status: green = daemon running, red = daemon offline
@@ -200,22 +240,6 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             lines.push(Line::from(Span::styled("   no models", Style::default().fg(Color::Rgb(71, 85, 105)))));
         }
     }
-
-    // ── Focus Stack ──
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" Focus Stack", Style::default().fg(Color::Rgb(251, 191, 36)).add_modifier(Modifier::BOLD))));
-
-    // TODO: wire to app.tab().focus_stack when integrated
-    lines.push(Line::from(Span::styled("   (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
-
-    // ── Backlog ──
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" Backlog", Style::default().fg(Color::Rgb(125, 211, 252)).add_modifier(Modifier::BOLD))));
-    lines.push(Line::from(Span::styled("   (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
-
-    // ── Web ──
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(format!(" 🌐 {}", app.web_url()), Style::default().fg(Color::Rgb(99, 102, 241)))));
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
