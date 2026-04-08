@@ -36,6 +36,7 @@ pub fn extended_commands() -> Vec<Box<dyn Command>> {
         Box::new(WebCommand),
         Box::new(ProjectCommand),
         Box::new(SessionSwitchCommand),
+        Box::new(PasteImageCommand),
     ]
 }
 
@@ -505,5 +506,48 @@ impl Command for SessionSwitchCommand {
         } else {
             format!("Switching to session: {args}\nUse /resume {args} to load the session history.")
         }
+    }
+}
+
+// --- /paste-image ---
+struct PasteImageCommand;
+#[async_trait]
+impl Command for PasteImageCommand {
+    fn name(&self) -> &str { "paste-image" }
+    fn aliases(&self) -> Vec<&str> { vec!["pi", "image"] }
+    fn description(&self) -> &str { "Paste an image from clipboard or file path for analysis" }
+    async fn execute(&self, args: &str, session: &mut AgentSession) -> String {
+        if !args.is_empty() {
+            // Treat args as file path
+            let path = std::path::Path::new(args.trim());
+            if path.exists() {
+                return format!("Image loaded: {}\nThe agent will analyze this image using the PhotoAnalysis tool.", path.display());
+            }
+            return format!("File not found: {args}");
+        }
+
+        // Try to get image from clipboard (macOS)
+        #[cfg(target_os = "macos")]
+        {
+            // Check if clipboard has image
+            let check = tokio::process::Command::new("osascript")
+                .args(["-e", "the clipboard as «class PNGf»"])
+                .output().await;
+
+            if let Ok(out) = check {
+                if out.status.success() {
+                    // Save clipboard image to temp file
+                    let temp_path = "/tmp/ff_clipboard_image.png";
+                    let save_cmd = format!(
+                        "osascript -e 'set png_data to the clipboard as «class PNGf»' -e 'set fp to open for access POSIX file \"{}\" with write permission' -e 'write png_data to fp' -e 'close access fp'",
+                        temp_path
+                    );
+                    let _ = tokio::process::Command::new("bash").arg("-c").arg(&save_cmd).output().await;
+                    return format!("Image saved from clipboard: {temp_path}\nUse: PhotoAnalysis file_path=\"{temp_path}\" to analyze it.");
+                }
+            }
+        }
+
+        "No image in clipboard. Usage:\n  /paste-image /path/to/image.png\n  Or copy an image to clipboard first, then /paste-image".into()
     }
 }

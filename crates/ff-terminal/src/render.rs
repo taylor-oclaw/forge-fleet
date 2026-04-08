@@ -67,13 +67,14 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Span::styled("ForgeFleet", theme.header),
         Span::styled(&project_name, Style::default().fg(Color::Rgb(139, 92, 246))),
         Span::styled(
-            format!("│ Model: {} │ Turn: {}/{} │ {}",
+            format!("│ Model: {} │ Turn: {}/{} │ {} │ ",
                 &tab.current_model[..tab.current_model.len().min(25)],
                 tab.turn, app.config.max_turns,
                 &app.config.llm_base_url,
             ),
             theme.status_text,
         ),
+        Span::styled(app.web_url(), Style::default().fg(Color::Rgb(99, 102, 241))),
     ]);
 
     frame.render_widget(Paragraph::new(header).style(Style::default().bg(Color::Rgb(30, 41, 59))), area);
@@ -137,9 +138,7 @@ fn render_left_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
     lines.push(Line::from(Span::styled(format!("  Turn {}/{}", tab.turn, 30), Style::default().fg(Color::Rgb(100, 116, 139)))));
     lines.push(Line::from(Span::styled(format!("  Model: {}", tab.current_model), Style::default().fg(Color::Rgb(100, 116, 139)))));
 
-    // Web link
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(format!(" 🌐 {}", app.web_url()), Style::default().fg(Color::Rgb(99, 102, 241)))));
+    // (web URL moved to header)
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
