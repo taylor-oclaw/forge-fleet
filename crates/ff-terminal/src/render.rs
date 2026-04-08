@@ -141,24 +141,28 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .title(Span::styled(" Fleet ", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" Info ", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let bar_max = (inner.width as usize).saturating_sub(6);
     let mut lines = Vec::new();
 
-    // Project info
+    // Project
     if let Some(project) = &app.current_project {
         lines.push(Line::from(vec![
-            Span::styled(" Project: ", Style::default().fg(Color::Rgb(100, 116, 139))),
+            Span::styled(" 📁 ", Style::default()),
             Span::styled(&project.name, Style::default().fg(Color::Rgb(139, 92, 246)).add_modifier(Modifier::BOLD)),
         ]));
         lines.push(Line::from(""));
     }
 
-    // Fleet nodes with daemon status + models
+    // ── Fleet ──
+    lines.push(Line::from(Span::styled(" Fleet", Style::default().fg(theme.fg).add_modifier(Modifier::BOLD))));
+
     for node in &app.fleet_nodes {
+        // Computer status: green = daemon running, red = daemon offline
         let (daemon_icon, daemon_color) = if node.daemon_online {
             ("●", Color::Rgb(74, 222, 128))
         } else {
@@ -167,29 +171,29 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         lines.push(Line::from(vec![
             Span::styled(format!(" {daemon_icon} "), Style::default().fg(daemon_color)),
             Span::styled(&node.name, Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" ({})", node.ip), Style::default().fg(Color::Rgb(71, 85, 105))),
         ]));
 
-        // Models on this node
+        // Each model: its own green/red + mini token bar
         for model in &node.models {
-            let (model_icon, model_color) = if model.online {
-                ("▸", Color::Rgb(74, 222, 128))
+            let (icon, color) = if model.online {
+                ("●", Color::Rgb(74, 222, 128))
             } else {
-                ("▹", Color::Rgb(100, 116, 139))
+                ("○", Color::Rgb(248, 113, 113))
             };
-            let token_pct = if model.context_window > 0 {
-                (model.tokens_used as f64 / model.context_window as f64 * 100.0) as u16
-            } else { 0 };
 
             lines.push(Line::from(vec![
-                Span::styled(format!("   {model_icon} "), Style::default().fg(model_color)),
+                Span::styled(format!("   {icon} "), Style::default().fg(color)),
                 Span::styled(&model.name, Style::default().fg(Color::Rgb(148, 163, 184))),
             ]));
-            if model.online && model.context_window > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!("     {}K ctx | {token_pct}%", model.context_window / 1024),
-                    Style::default().fg(Color::Rgb(71, 85, 105)),
-                )));
+
+            // Mini token bar for each model
+            if model.context_window > 0 {
+                let pct = if model.context_window > 0 { (model.tokens_used as f64 / model.context_window as f64 * 100.0) as u16 } else { 0 };
+                let filled = (bar_max as f64 * pct as f64 / 100.0) as usize;
+                let empty = bar_max.saturating_sub(filled);
+                let bar_color = if pct < 50 { Color::Rgb(74, 222, 128) } else if pct < 80 { Color::Rgb(251, 191, 36) } else { Color::Rgb(248, 113, 113) };
+                let bar = format!("   {}{}  {}K {pct}%", "█".repeat(filled), "░".repeat(empty), model.context_window / 1024);
+                lines.push(Line::from(Span::styled(bar, Style::default().fg(bar_color))));
             }
         }
         if node.models.is_empty() {
@@ -197,32 +201,21 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         }
     }
 
-    // Current model tokens
+    // ── Focus Stack ──
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!(" Model: {}", app.tab().current_model),
-        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-    )));
+    lines.push(Line::from(Span::styled(" Focus Stack", Style::default().fg(Color::Rgb(251, 191, 36)).add_modifier(Modifier::BOLD))));
 
-    let pct = if app.tab().tokens_total > 0 {
-        (app.tab().tokens_used as f64 / app.tab().tokens_total as f64 * 100.0) as u16
-    } else { 0 };
-    let bar_width = ((inner.width as f64 - 2.0) * pct as f64 / 100.0) as u16;
-    let bar_color = if pct < 50 { Color::Rgb(74, 222, 128) } else if pct < 80 { Color::Rgb(251, 191, 36) } else { Color::Rgb(248, 113, 113) };
+    // TODO: wire to app.tab().focus_stack when integrated
+    lines.push(Line::from(Span::styled("   (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
 
-    let bar: String = "█".repeat(bar_width as usize) + &"░".repeat((inner.width as usize).saturating_sub(bar_width as usize + 2));
-    lines.push(Line::from(Span::styled(format!(" {bar}"), Style::default().fg(bar_color))));
-    lines.push(Line::from(Span::styled(
-        format!(" {}/{} ({pct}%)", app.tab().tokens_used, app.tab().tokens_total),
-        Style::default().fg(Color::Rgb(100, 116, 139)),
-    )));
-
-    // Web UI link
+    // ── Backlog ──
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!(" Web: {}", app.web_url()),
-        Style::default().fg(Color::Rgb(99, 102, 241)),
-    )));
+    lines.push(Line::from(Span::styled(" Backlog", Style::default().fg(Color::Rgb(125, 211, 252)).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled("   (empty)", Style::default().fg(Color::Rgb(71, 85, 105)))));
+
+    // ── Web ──
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(format!(" 🌐 {}", app.web_url()), Style::default().fg(Color::Rgb(99, 102, 241)))));
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
@@ -302,8 +295,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Span::styled(" ", Style::default()),
         Span::styled(&app.tab().status, theme.status_text),
         Span::styled(
-            format!("  │  Session: {}  │  Messages: {}  │  v{}",
-                if app.tab().session_id.len() > 8 { &app.tab().session_id[..8] } else { &app.tab().session_id },
+            format!("  │  {} │  Messages: {}  │  v{}",
+                if app.tab().name.is_empty() { format!("Session {}", app.active_tab + 1) } else { app.tab().name.clone() },
                 app.tab().messages.len(),
                 env!("CARGO_PKG_VERSION"),
             ),
